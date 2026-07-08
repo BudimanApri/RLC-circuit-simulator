@@ -1,11 +1,5 @@
 # Series Circuit Simulator — R / RC / RL / LC / RLC
 
-Interactive simulation built around the assignment:
-
-> L·Q″ + R·Q′ + Q/C = E(t), with R = 1000 Ω, L = 3.5 H, C = 2×10⁻⁶ F,
-> E(t) = 120 sin(377t) Volt, and initial conditions Q(0) = 0, I(0) = 0
-> (switch closed at t = 0). Find Q(t) and I(t).
-
 Besides the full RLC circuit (the default, matching the assignment), the
 simulator can also run the **RL**, **RC**, **LC**, and **R-only** variants —
 absent components are genuinely removed from the equation and the schematic,
@@ -137,17 +131,3 @@ free-form circuit builder, AC/DC sources, per-branch probes).
 7. (Optional) Click the **RC** / **RL** / **LC** / **R** topology buttons to
    compare the circuit families: 1st-order time constants, the charge offset
    in RL, undamped beats in LC, and the instantaneous response of pure R.
-
-## Assignment answer (also shown in the app)
-
-Underdamped case: α = 142.86 s⁻¹, ω_d = 349.93 rad/s.
-
-```
-Q(t) = e^(-142.9t)·[3.183e-4·cos(349.9t) + 1.276e-4·sin(349.9t)]
-       + 2.152e-6·sin(377t) - 3.183e-4·cos(377t)          Coulomb
-
-I(t) = e^(-142.9t)·[-8.112e-4·cos(349.9t) - 0.1296·sin(349.9t)]
-       + 8.112e-4·cos(377t) + 0.12·sin(377t)               Ampere
-```
-
-Steady-state current amplitude ≈ 0.12 A (|Z| ≈ 1000 Ω).
