@@ -70,7 +70,7 @@ KVL check and an independent V_L = L·dI/dt check.
 
 | Source | E(t) | What it shows |
 |---|---|---|
-| **AC** (default) | E₀·sin(ωt) | The assignment problem: transient ringing settling into a steady sinusoidal response; impedance, phase angle, and resonance apply |
+| **AC** (default) | E₀·sin(ωt) | Default with default values |
 | **DC** | E₀ for t ≥ 0 (step) | Classic charging/discharging curves: RC capacitor charge-up, RL current rise, LC step ringing (never settles), RLC step response. The steady state is a constant (or a ramp for topologies without a capacitor) instead of a sinusoid |
 
 The damping classification (underdamped/critical/overdamped/1st-order,
@@ -108,26 +108,3 @@ component values, and time span.
 
 See [ROADMAP.md](ROADMAP.md) for the development plan (parallel circuits,
 free-form circuit builder, AC/DC sources, per-branch probes).
-
-## Suggested screen-recording flow (covers the assignment)
-
-1. Open the app — show the schematic and the default parameters matching the
-   assignment exactly (R = 1000 Ω, L = 3.5 H, C = 2 µF, E = 120 sin 377t V),
-   plus the initial-condition markers Q(0) = 0 and I(0) = 0 on the charts.
-2. Click **Play**: the Q(t), I(t), and voltage curves draw progressively.
-   Explain the transient phase (orange shaded region, damped oscillation
-   inside the e^(−αt) envelope) which practically dies at the 5τ = 35 ms
-   marker, then the steady-state phase.
-3. Tick **Steady-state** and Play again — the curves lock onto the
-   steady-state solution once the transient dies.
-4. Tick **RK4 (numeric)** — the dotted lines overlay the analytic ones with a
-   difference of ~10⁻¹⁶, proving the answer formulas are correct.
-5. Read out the **Q(t)** and **I(t)** formulas in the "Solution (assignment
-   answer)" panel — this is the final answer.
-6. (Optional) Drag R/C/ω — or type exact values in the numeric boxes — to
-   explore: the IMPEDANCE & RESONANCE panel shows ω₀ ≈ 378 rad/s, very close
-   to the source ω = 377 rad/s (the resonance indicator turns green), and the
-   voltage chart shows V_L, V_C ≈ 158 V each — larger than the source!
-7. (Optional) Click the **RC** / **RL** / **LC** / **R** topology buttons to
-   compare the circuit families: 1st-order time constants, the charge offset
-   in RL, undamped beats in LC, and the instantaneous response of pure R.
