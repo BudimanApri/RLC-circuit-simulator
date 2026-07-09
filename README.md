@@ -22,6 +22,18 @@ on top of *that*, a free-form **circuit builder** (Milestone 4,
 picking from the 9 fixed presets — see
 [Free-form circuit builder](#free-form-circuit-builder-milestone-4) below.
 
+## Screenshots
+
+**Fixed-preset simulator** — parallel R∥L∥C driven near resonance, with the
+impedance/resonance panel and branch-current multi-trace chart:
+
+![Parallel R∥L∥C resonance in the fixed-preset simulator](Capture/parallel-resonance-simulator.png)
+
+**Free-form circuit builder** — an 11-component custom network with
+voltage, current, charge, and energy all probed at once:
+
+![An 11-component circuit in the free-form builder, with voltage/current/charge/energy probes](Capture/circuit-builder-probes.png)
+
 ## Running
 
 ```
@@ -138,7 +150,7 @@ The IMPEDANCE & RESONANCE panel shows the parallel impedance |Zp| and phase
 (only for R∥L∥C and Tank in AC mode, since R∥C/R∥L have no resonance), and
 the 5τ transient marker works the same way as in series mode. Steady-state
 overlay, RK4 verification, and the transient envelope are series-only for
-now (see [ROADMAP.md](ROADMAP.md)).
+now — planned for a future update.
 
 ## General netlist engine (Milestone 3)
 
@@ -179,8 +191,9 @@ closed-form presets (5 series + 4 parallel) × AC/DC, matching to within
 ~10⁻⁴ relative error — consistent with the expected 2nd-order trapezoidal
 discretization error, permanently re-run in `--test`. `probe_energy()`
 also reports stored energy in any L/C and cumulative dissipated energy in
-any R. See [ROADMAP.md](ROADMAP.md) for the performance numbers and the
-one real bug this uncovered along the way.
+any R. Performance: a 19-component circuit resolves at ~20 recomputes/sec
+at the app's default 3000-sample resolution — fast enough for live
+interactive use, though it degrades at much higher sample counts.
 
 ## Free-form circuit builder (Milestone 4)
 
@@ -209,7 +222,11 @@ fixed presets above.
 4. **Select**: click a component to edit its value (and, for VSRC/ISRC,
    toggle AC/DC, set ω, and flip polarity) in the PROPERTIES card, and to
    toggle its current into the RESULTS charts. Click a bare grid point to
-   toggle its voltage into the results instead.
+   toggle its voltage into the results instead. For R/L/C, the same card
+   shows **Q (charge)** and **E (energy)** probe buttons instead of the
+   source controls — Q only appears for capacitors, E for any of R/L/C —
+   letting you probe charge/energy independently of (and in addition to)
+   the current probe.
 5. **Delete**: click a component or wire to remove it.
 6. **Save JSON** / **Load JSON**: write or read back the circuit
    (`Netlist.to_json()`/`from_json()` under the hood) via a normal file
@@ -218,7 +235,10 @@ fixed presets above.
 The circuit resolves automatically after every edit as soon as it has a
 ground and a source and validates — before that, the CIRCUIT card tells
 you what's missing in plain language rather than failing silently or
-crashing.
+crashing. This includes **short circuits**: if a wire connects both
+terminals of the same component to one node (directly, or through a longer
+chain of wires), the status bar names the offending component instead of
+crashing — remove the shorting wire or move the component to fix it.
 
 **Source polarity:** whichever grid point you click **first** when placing
 a VSRC/ISRC is node_a — its "+" terminal (VSRC) or the direction current
@@ -238,6 +258,16 @@ small sine tick inside the circle. When **every** source in the circuit is
 DC, small grey arrows appear on each component showing the actual
 (steady-state) current direction — omitted for AC circuits since the
 direction reverses every half-cycle there.
+
+**Charge & energy probes:** in addition to voltage/current, a capacitor can
+be probed for charge (`Q = C·V`) and any of R/L/C for energy (½CV² / ½LI²
+for L/C, cumulative ∫I²R·dt for R) via the Q/E buttons described above.
+Probed components get a small diamond (Q) and/or triangle (E) badge on the
+canvas, nested with the existing current-probe circle. Both plot on a third
+RESULTS chart with charge on the left axis (Coulombs, solid lines) and
+energy on the right axis (Joules, dashed lines) — they're combined into one
+chart, on twin y-axes, rather than getting a fourth chart each, since the
+two units don't share a scale.
 
 ## Display elements
 
@@ -268,7 +298,3 @@ direction reverses every half-cycle there.
 | `rlc_netlist.py` | General netlist data model: `Component`, `Netlist`, JSON round-trip (pure Python) |
 | `rlc_mna.py` | General trapezoidal-MNA transient solver + probes API (pure numpy, optional scipy for speed) |
 | `rlc_builder.py` | Free-form circuit builder: standalone app + its own `--test` mode |
-
-See [ROADMAP.md](ROADMAP.md) for the development plan and what's left
-(undo/redo, short-circuit warnings, a charge/energy probe toggle — see its
-backlog section).

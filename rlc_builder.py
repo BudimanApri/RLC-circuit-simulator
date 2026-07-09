@@ -60,7 +60,8 @@ from matplotlib.widgets import Button, TextBox
 
 from rlc_config import TH, C_R, C_L, C_C, C_SRC
 from rlc_netlist import Netlist
-from rlc_mna import simulate, probe_voltage, probe_current, probe_charge
+from rlc_mna import (simulate, probe_voltage, probe_current, probe_charge,
+                     probe_energy)
 
 GX, GY = 13, 9                       # grid columns/rows (0-indexed)
 TOOLS = ["R", "L", "C", "VSRC", "ISRC", "WIRE", "GROUND", "SELECT", "DELETE"]
@@ -230,6 +231,8 @@ class BuilderApp:
         self.selected = None           # index into self.placements
         self.probes_v = set()          # grid points
         self.probes_i = set()          # indices into self.placements
+        self.probes_q = set()          # indices into self.placements (C only)
+        self.probes_e = set()          # indices into self.placements (R/L/C)
         self.T_ms = 80.0
         self.result = None
         self.status = ""
@@ -237,6 +240,17 @@ class BuilderApp:
 
         self.fig = plt.figure(figsize=(14.5, 9.0))
         self.fig.patch.set_facecolor(TH["bg"])
+        # Work around a matplotlib TextBox bug: clicking into a TextBox
+        # (e.g. the value box) grabs the canvas's mouse; clicking a
+        # *different* widget's axes afterwards makes TextBox stop accepting
+        # keystrokes but never actually releases that grab, so the next
+        # widget's own grab_mouse() raises "Another Axes already grabs
+        # mouse input" and the click is lost. Connected here, before any
+        # widget is constructed, so it runs first for every click and
+        # releases any stale grab before the clicked widget tries to
+        # acquire its own.
+        self.fig.canvas.mpl_connect("button_press_event",
+                                    self._release_stale_grab)
         try:
             self.fig.canvas.manager.set_window_title(
                 "Circuit Builder — free-form (Milestone 4)")
@@ -287,7 +301,8 @@ class BuilderApp:
         self.box_value = TextBox(axv, "", initial="", color="#f8fafc")
         self.box_value.on_submit(self._on_value_submit)
 
-        self.fig.text(0.735, 0.816, "source", fontsize=7.5, color=TH["sub"])
+        self.txt_source_lbl = self.fig.text(0.735, 0.816, "source",
+                                            fontsize=7.5, color=TH["sub"])
         self.src_btns = {}
         for j, name in enumerate(("AC", "DC")):
             axb = self.fig.add_axes([0.735 + j * 0.058, 0.782, 0.054, 0.028])
@@ -298,11 +313,28 @@ class BuilderApp:
             b.on_clicked(lambda ev, nm=name: self._on_source_type(nm))
             self.src_btns[name] = b
 
-        self.fig.text(0.860, 0.816, "ω (rad/s)", fontsize=7.5,
-                      color=TH["sub"])
+        self.txt_freq_lbl = self.fig.text(0.860, 0.816, "ω (rad/s)",
+                                          fontsize=7.5, color=TH["sub"])
         axf = self.fig.add_axes([0.860, 0.782, 0.10, 0.028])
         self.box_freq = TextBox(axf, "", initial="", color="#f8fafc")
         self.box_freq.on_submit(self._on_freq_submit)
+
+        # probe toggles for non-sources: Q (charge, capacitors only) and E
+        # (energy, R/L/C) share the same footprint as the source/ω controls
+        # above -- the two groups are mutually exclusive (a component is
+        # either a source or a passive element) so only one is ever visible
+        self.txt_probe_lbl = self.fig.text(0.735, 0.816, "probe",
+                                           fontsize=7.5, color=TH["sub"])
+        self.probe_btns = {}
+        for j, (key, label) in enumerate((("Q", "Q  (charge)"),
+                                          ("E", "E  (energy)"))):
+            axb = self.fig.add_axes([0.735 + j * 0.125, 0.782, 0.115, 0.028])
+            b = Button(axb, label, color="#e2e8f0", hovercolor="#cbd5e1")
+            b.label.set_fontsize(7.5)
+            for sp in axb.spines.values():
+                sp.set_visible(False)
+            b.on_clicked(lambda ev, k=key: self._on_probe_toggle(k))
+            self.probe_btns[key] = b
 
         self.txt_hint = self.fig.text(
             0.615, 0.750, "select a component (SELECT tool) to edit it here",
@@ -315,6 +347,7 @@ class BuilderApp:
             sp.set_visible(False)
         self.btn_flip.on_clicked(lambda ev: self._flip_selected())
         self.btn_flip.ax.set_visible(False)
+        self.btn_flip.set_active(False)
 
         # ---- circuit card (time span, save/load, status) -------------------------
         self._card([0.605, 0.335, 0.375, 0.375], "CIRCUIT")
@@ -358,10 +391,13 @@ class BuilderApp:
 
         # ---- results charts --------------------------------------------------------
         self._card([0.02, 0.02, 0.955, 0.29], "RESULTS  —  probed nodes "
-                   "(voltage) and components (current)")
-        self.ax_v = self.fig.add_axes([0.065, 0.045, 0.42, 0.235])
-        self.ax_i = self.fig.add_axes([0.565, 0.045, 0.42, 0.235])
-        for ax, lab in ((self.ax_v, "Voltage (V)"), (self.ax_i, "Current (A)")):
+                   "(voltage), components (current, charge, energy)")
+        self.ax_v = self.fig.add_axes([0.045, 0.045, 0.27, 0.235])
+        self.ax_i = self.fig.add_axes([0.363, 0.045, 0.27, 0.235])
+        self.ax_q = self.fig.add_axes([0.681, 0.045, 0.225, 0.235])
+        self.ax_e = self.ax_q.twinx()          # shares x, own y-axis (Joules)
+        for ax, lab in ((self.ax_v, "Voltage (V)"), (self.ax_i, "Current (A)"),
+                        (self.ax_q, "Charge (C)")):
             ax.set_facecolor("white")
             ax.set_xlabel("t (ms)", fontsize=8)
             ax.set_ylabel(lab, fontsize=8)
@@ -369,6 +405,9 @@ class BuilderApp:
             ax.grid(True, ls="--", lw=0.5, alpha=0.4)
             for sp in ("top", "right"):
                 ax.spines[sp].set_visible(False)
+        self.ax_e.set_ylabel("Energy (J)", fontsize=8)
+        self.ax_e.tick_params(labelsize=7.5, colors=TH["sub"])
+        self.ax_e.spines["top"].set_visible(False)
 
         self.fig.canvas.mpl_connect("button_press_event", self._on_click)
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
@@ -448,6 +487,17 @@ class BuilderApp:
             if d < best_d:
                 best, best_d = i, d
         return best
+
+    def _release_stale_grab(self, ev):
+        # NB: ev.inaxes is not trustworthy here -- while a grab is active,
+        # matplotlib's own LocationEvent.__init__ sets .inaxes to the
+        # grabber itself regardless of where the click actually landed
+        # (that's the whole point of a mouse grab). Check the actual pixel
+        # position against the grabber's bounding box instead, the same
+        # way TextBox._click itself decides whether a click was "outside".
+        grabber = self.fig.canvas.mouse_grabber
+        if grabber is not None and not grabber.contains(ev)[0]:
+            self.fig.canvas.release_mouse(grabber)
 
     # -------------------------------------------------------------- clicks
     def _on_click(self, ev):
@@ -592,6 +642,10 @@ class BuilderApp:
         pl = self.placements.pop(idx)
         self.probes_i = {j if j < idx else j - 1 for j in self.probes_i
                          if j != idx}
+        self.probes_q = {j if j < idx else j - 1 for j in self.probes_q
+                         if j != idx}
+        self.probes_e = {j if j < idx else j - 1 for j in self.probes_e
+                         if j != idx}
         if self.selected == idx:
             self.selected = None
             self._show_properties(None)
@@ -606,6 +660,8 @@ class BuilderApp:
         self.ground = None
         self.probes_v.clear()
         self.probes_i.clear()
+        self.probes_q.clear()
+        self.probes_e.clear()
         self.selected = None
         self.anchor = None
         self._next_id = {k: 1 for k in ("R", "L", "C", "VSRC", "ISRC")}
@@ -636,18 +692,39 @@ class BuilderApp:
         self._redraw_canvas()
         self._redraw_charts()
 
+    def _show_widget(self, widget, show):
+        """Toggle a Button/TextBox's visibility AND activate/deactivate it
+        together. Several widgets in PROPERTIES occupy the *same* screen
+        rectangle (source/ω controls vs. Q/E probe controls are mutually
+        exclusive, so their axes overlap to save space) and are switched by
+        visibility alone. `ax.set_visible(False)` only stops it from being
+        *drawn* -- matplotlib's own hit-testing (`Widget.ignore()`) only
+        checks `.active`, not visibility, so a hidden-but-still-active
+        Button sitting under a visible one still receives every click on
+        that shared rectangle and tries to grab the mouse for itself too,
+        colliding with the visible widget's own grab and raising
+        'Another Axes already grabs mouse input'. Always use this instead
+        of touching `.ax.set_visible()` directly for any toggled widget."""
+        widget.ax.set_visible(show)
+        widget.set_active(show)
+
     def _show_properties(self, pl):
         if pl is None:
             self.txt_sel.set_text("(nothing selected)")
             self.box_value.set_val("")
             self.box_freq.set_val("")
-            self.box_freq.ax.set_visible(False)
-            self.btn_flip.ax.set_visible(False)
+            self._show_widget(self.box_freq, False)
+            self._show_widget(self.btn_flip, False)
             self.txt_hint.set_visible(True)
+            self.txt_source_lbl.set_visible(False)
+            self.txt_freq_lbl.set_visible(False)
+            self.txt_probe_lbl.set_visible(False)
             for b in self.src_btns.values():
                 b.color = "#e2e8f0"
                 b.ax.set_facecolor(b.color)
-                b.ax.set_visible(False)
+                self._show_widget(b, False)
+            for b in self.probe_btns.values():
+                self._show_widget(b, False)
             self.fig.canvas.draw_idle()
             return
         is_src = pl["kind"] in ("VSRC", "ISRC")
@@ -656,17 +733,59 @@ class BuilderApp:
                               (f"   [{label} @ {pl['p1']}]" if is_src
                                else ""))
         self.box_value.set_val(f"{pl['value']:.6g}")
-        self.box_freq.ax.set_visible(is_src and pl["source_type"] == "AC")
+        show_freq = is_src and pl["source_type"] == "AC"
+        self._show_widget(self.box_freq, show_freq)
+        self.txt_freq_lbl.set_visible(show_freq)
         self.box_freq.set_val(f"{pl['freq']:.6g}")
-        self.btn_flip.ax.set_visible(is_src)
+        self._show_widget(self.btn_flip, is_src)
         self.txt_hint.set_visible(not is_src)
+        self.txt_source_lbl.set_visible(is_src)
         for nm, b in self.src_btns.items():
-            b.ax.set_visible(is_src)
+            self._show_widget(b, is_src)
             active = is_src and nm == pl["source_type"]
             b.color = TH["accent"] if active else "#e2e8f0"
             b.ax.set_facecolor(b.color)
             b.label.set_color("white" if active else TH["text"])
+
+        can_q = pl["kind"] == "C"                       # probe_charge: C only
+        can_e = pl["kind"] in ("R", "L", "C")            # probe_energy: not sources
+        self.txt_probe_lbl.set_visible(not is_src)
+        idx = self.selected
+        for key, can in (("Q", can_q), ("E", can_e)):
+            b = self.probe_btns[key]
+            self._show_widget(b, not is_src and can)
+            active = can and idx is not None and \
+                idx in (self.probes_q if key == "Q" else self.probes_e)
+            b.color = TH["accent"] if active else "#e2e8f0"
+            b.ax.set_facecolor(b.color)
+            b.label.set_color("white" if active else TH["text"])
         self.fig.canvas.draw_idle()
+
+    def _on_probe_toggle(self, key):
+        """Toggle the selected component into/out of the charge (Q, C only)
+        or energy (E, R/L/C) probe set -- kept as separate buttons rather
+        than folded into the SELECT-tool click (which already toggles the
+        current probe) since a component can be probed for any combination
+        of I/Q/E at once and a single click can't express that."""
+        if self.selected is None:
+            return
+        pl = self.placements[self.selected]
+        target = self.probes_q if key == "Q" else self.probes_e
+        allowed = pl["kind"] == "C" if key == "Q" else \
+            pl["kind"] in ("R", "L", "C")
+        if not allowed:
+            return
+        kind_name = "charge" if key == "Q" else "energy"
+        if self.selected in target:
+            target.discard(self.selected)
+            self._set_status(f"{kind_name.capitalize()} probe removed "
+                             f"from {pl['name']}.")
+        else:
+            target.add(self.selected)
+            self._set_status(f"Probing {kind_name} of {pl['name']}.")
+        self._show_properties(pl)
+        self._redraw_canvas()
+        self._redraw_charts()
 
     def _flip_selected(self):
         """Swap node_a/node_b on the selected source, reversing its
@@ -736,7 +855,20 @@ class BuilderApp:
         return name_of
 
     def build_netlist(self):
+        """Raises ValueError (with a plain-English message) if a wire
+        connects both terminals of the same component to one node -- a
+        short circuit. This is checked here, before constructing any
+        Component, because Component.__post_init__ also rejects
+        node_a == node_b but with a message aimed at library callers, not
+        UI users, and only for the first offender found."""
         name_of = self._canonical_names()
+        shorted = [pl["name"] for pl in self.placements
+                  if name_of(pl["p1"]) == name_of(pl["p2"])]
+        if shorted:
+            raise ValueError(
+                f"{', '.join(shorted)} — a wire connects both of that "
+                f"component's terminals to the same node. Remove the "
+                f"shorting wire, or move the component.")
         nl = Netlist(ground="0")
         for pl in self.placements:
             nl.add(pl["kind"], name_of(pl["p1"]), name_of(pl["p2"]),
@@ -747,7 +879,15 @@ class BuilderApp:
 
     def _resolve(self):
         self.result = None
-        nl, name_of = self.build_netlist()
+        try:
+            nl, name_of = self.build_netlist()
+        except ValueError as e:
+            self._name_of = self._canonical_names()
+            self.txt_netlist.set_text("(short circuit -- see status)")
+            self._set_status(f"Short circuit: {e}")
+            self._redraw_canvas()
+            self._redraw_charts()
+            return
         self._name_of = name_of
         self.txt_netlist.set_text(self._netlist_summary(nl))
 
@@ -831,6 +971,12 @@ class BuilderApp:
                     if False else self._probe_color_i(i)
                 ax.plot(mx, my, "o", ms=16, mfc="none", mec=pc, mew=1.8,
                        zorder=4)
+            if i in self.probes_q:
+                ax.plot(mx, my, "D", ms=9, mfc="none",
+                       mec=self._probe_color_q(i), mew=1.3, zorder=4)
+            if i in self.probes_e:
+                ax.plot(mx, my, "^", ms=11, mfc="none",
+                       mec=self._probe_color_e(i), mew=1.3, zorder=4)
 
         if self.ground is not None:
             gx, gy = self.ground
@@ -856,9 +1002,17 @@ class BuilderApp:
         ordered = sorted(self.probes_i)
         return PROBE_COLORS[ordered.index(idx) % len(PROBE_COLORS)]
 
+    def _probe_color_q(self, idx):
+        ordered = sorted(self.probes_q)
+        return PROBE_COLORS[ordered.index(idx) % len(PROBE_COLORS)]
+
+    def _probe_color_e(self, idx):
+        ordered = sorted(self.probes_e)
+        return PROBE_COLORS[ordered.index(idx) % len(PROBE_COLORS)]
+
     def _redraw_charts(self):
-        for ax, lab in ((self.ax_v, "Voltage (V)"), (self.ax_i,
-                                                      "Current (A)")):
+        for ax, lab in ((self.ax_v, "Voltage (V)"), (self.ax_i, "Current (A)"),
+                        (self.ax_q, "Charge (C)")):
             ax.cla()
             ax.set_facecolor("white")
             ax.set_xlabel("t (ms)", fontsize=8)
@@ -867,14 +1021,23 @@ class BuilderApp:
             ax.grid(True, ls="--", lw=0.5, alpha=0.4)
             for sp in ("top", "right"):
                 ax.spines[sp].set_visible(False)
+        self.ax_e.cla()
+        # cla() resets a twin axes back to default (left-side) tick/label
+        # placement, undoing what twinx() set up at construction -- have to
+        # re-assert "this axis lives on the right" on every redraw, not
+        # just once at __init__ time.
+        self.ax_e.yaxis.tick_right()
+        self.ax_e.yaxis.set_label_position("right")
+        self.ax_e.set_facecolor("none")
+        self.ax_e.set_ylabel("Energy (J)", fontsize=8)
+        self.ax_e.tick_params(labelsize=7.5, colors=TH["sub"])
+        self.ax_e.spines["top"].set_visible(False)
 
         if self.result is None:
-            self.ax_v.text(0.5, 0.5, "no solved result yet",
-                           transform=self.ax_v.transAxes, ha="center",
-                           color=TH["sub"], fontsize=9)
-            self.ax_i.text(0.5, 0.5, "no solved result yet",
-                           transform=self.ax_i.transAxes, ha="center",
-                           color=TH["sub"], fontsize=9)
+            for ax in (self.ax_v, self.ax_i, self.ax_q):
+                ax.text(0.5, 0.5, "no solved result yet",
+                       transform=ax.transAxes, ha="center",
+                       color=TH["sub"], fontsize=9)
             self.fig.canvas.draw_idle()
             return
 
@@ -897,16 +1060,55 @@ class BuilderApp:
                 continue
             self.ax_i.plot(tms, iv, color=self._probe_color_i(i), lw=1.5,
                            label=f"I({pl['name']})")
+        q_lines, e_lines = [], []
+        for i in sorted(self.probes_q):
+            if i >= len(self.placements) or self.placements[i]["kind"] != "C":
+                continue
+            pl = self.placements[i]
+            try:
+                qv = probe_charge(self.result, pl["name"])
+            except KeyError:
+                continue
+            ln, = self.ax_q.plot(tms, qv, color=self._probe_color_q(i),
+                                 lw=1.5, ls="-", label=f"Q({pl['name']})")
+            q_lines.append(ln)
+        for i in sorted(self.probes_e):
+            if i >= len(self.placements) or \
+                    self.placements[i]["kind"] not in ("R", "L", "C"):
+                continue
+            pl = self.placements[i]
+            try:
+                ev = probe_energy(self.result, pl["name"])
+            except (KeyError, ValueError):
+                continue
+            ln, = self.ax_e.plot(tms, ev, color=self._probe_color_e(i),
+                                 lw=1.5, ls="--", label=f"E({pl['name']})")
+            e_lines.append(ln)
         if self.probes_v:
             self.ax_v.legend(fontsize=7, frameon=False)
         if self.probes_i:
             self.ax_i.legend(fontsize=7, frameon=False)
+        if q_lines or e_lines:
+            lines = q_lines + e_lines
+            self.ax_q.legend(lines, [ln.get_label() for ln in lines],
+                            fontsize=6, frameon=True, framealpha=0.8,
+                            facecolor="white", edgecolor="none",
+                            loc="upper left", labelspacing=0.25,
+                            handlelength=1.4, borderpad=0.3)
         self.fig.canvas.draw_idle()
 
     # ------------------------------------------------------------- save/load
     def save_json(self):
-        nl, _ = self.build_netlist()
-        data = dict(netlist=nl.to_dict(),
+        # placements/wires/ground below are the actual round-trip source of
+        # truth (see load_json) -- `netlist` is just a convenience snapshot
+        # for anyone inspecting the file by hand, so saving must still work
+        # even mid-short-circuit (build_netlist() raises ValueError then)
+        try:
+            nl, _ = self.build_netlist()
+            netlist_dict = nl.to_dict()
+        except ValueError:
+            netlist_dict = None
+        data = dict(netlist=netlist_dict,
                    placements=[{**pl, "p1": list(pl["p1"]),
                                "p2": list(pl["p2"])}
                               for pl in self.placements],
@@ -1046,6 +1248,37 @@ def _self_test(app, out):
     app._redraw_charts()
     print("builder : probe toggling OK (placement no longer auto-probes)")
 
+    # 2b) charge/energy probing: Q is C-only, E is R/L/C (not sources); both
+    #     toggle independently of the I probe and of each other. Toggling
+    #     these doesn't touch app.result, so it's safe to leave them set for
+    #     the rest of the suite -- later tests probe rlc_mna directly.
+    c_idx = next(i for i, pl in enumerate(app.placements)
+                if pl["kind"] == "C")
+    v_idx0 = next(i for i, pl in enumerate(app.placements)
+                 if pl["kind"] == "VSRC")
+
+    app._select_for_edit(c_idx)
+    app._on_probe_toggle("Q")
+    app._on_probe_toggle("E")
+    assert c_idx in app.probes_q and c_idx in app.probes_e
+
+    app._select_for_edit(r_idx)
+    app._on_probe_toggle("Q")                 # R is not a capacitor -> no-op
+    assert r_idx not in app.probes_q
+    app._on_probe_toggle("E")
+    assert r_idx in app.probes_e
+
+    app._select_for_edit(v_idx0)
+    app._on_probe_toggle("E")                 # sources have no energy probe
+    assert v_idx0 not in app.probes_e
+
+    app._redraw_canvas()                      # Q/E canvas badges must not raise
+    app._redraw_charts()
+    qv = probe_charge(app.result, app.placements[c_idx]["name"])
+    ev = probe_energy(app.result, app.placements[r_idx]["name"])
+    assert len(qv) == len(app.result.t) and len(ev) == len(app.result.t)
+    print("builder : charge/energy probe toggling (Q=C-only, E=not-sources) OK")
+
     # 3) source editing: AC/DC toggle + frequency
     v_idx = next(i for i, pl in enumerate(app.placements)
                 if pl["kind"] == "VSRC")
@@ -1160,10 +1393,117 @@ def _self_test(app, out):
     print("builder : validation feedback (no ground/source, floating "
           "node) OK")
 
+    # 10b) short circuit: a wire connecting both of a component's own
+    #      terminals must never crash the app (it used to, uncaught, before
+    #      this fix) and must give a plain-English status instead
+    app6 = BuilderApp()
+    app6._set_tool("VSRC")
+    app6._place((0, 0), (1, 0))
+    app6._set_tool("GROUND")
+    app6.ground = (0, 0)
+    app6._set_tool("WIRE")
+    app6._place_wire_path([(0, 0), (0, 3)])
+    app6._place_wire_path([(0, 3), (1, 3)])
+    app6._place_wire_path([(1, 3), (1, 0)])   # closes a loop shorting VSRC1
+    assert app6.result is None, app6.status
+    assert "short circuit" in app6.status.lower() and "VSRC1" in app6.status
+    app6._file_dialog = lambda save: base + "_short.json"
+    app6.save_json()                          # must not raise mid-short
+    assert "Saved" in app6.status
+    print("builder : short-circuit detection (no crash, clear status) OK")
+
     # 11) clear_all leaves a consistent empty state
     app3.clear_all()
     assert not app3.placements and not app3.wires and app3.ground is None
     app3.fig.savefig(base + "_empty" + ext, dpi=100)
+
+    # 12) a widget (e.g. the value TextBox) left mid-edit must not break the
+    #     next click on a different widget -- matplotlib's TextBox grabs the
+    #     canvas's mouse on click-in and only releases it via a full click
+    #     elsewhere; get this wrong and every subsequent widget click raises
+    #     "Another Axes already grabs mouse input" and is silently lost.
+    #     Uses real MouseEvents (not the _FakeEvent/_click helper above,
+    #     which only exercises our own canvas dispatch) since the bug lives
+    #     inside matplotlib's own widget internals.
+    from matplotlib.backend_bases import MouseEvent
+    app7 = BuilderApp()
+    app7._set_tool("C")
+    app7._place((0, 0), (1, 0))
+    app7._set_tool("SELECT")
+    app7._select_for_edit(0)
+    canvas7 = app7.fig.canvas
+
+    def _press(ax, frac=0.5):
+        x, y = ax.transAxes.transform((frac, 0.5))
+        canvas7.callbacks.process(
+            "button_press_event",
+            MouseEvent("button_press_event", canvas7, x, y, button=1))
+
+    def _release(ax, frac=0.5):
+        x, y = ax.transAxes.transform((frac, 0.5))
+        canvas7.callbacks.process(
+            "button_release_event",
+            MouseEvent("button_release_event", canvas7, x, y, button=1))
+
+    _press(app7.box_value.ax)                 # click into value box, don't
+    assert canvas7.mouse_grabber is app7.box_value.ax    # press Enter
+    _press(app7.probe_btns["Q"].ax)           # must not raise RuntimeError
+    _release(app7.probe_btns["Q"].ax)
+    assert 0 in app7.probes_q, "Q click was lost to the stale grab"
+    print("builder : stale TextBox mouse-grab doesn't break the next "
+          "widget click OK")
+
+    # 12b) the actual bug the user hit: select a component (SELECT tool,
+    #     real canvas click, no TextBox involved at all), then click Q/E --
+    #     still raised the same RuntimeError, for an unrelated reason: the
+    #     Q/E buttons' axes geometrically overlap the AC/DC buttons' and
+    #     the freq box's axes (both groups reuse the same screen rectangle
+    #     since they're mutually exclusive), and a *hidden* Button is still
+    #     hit-testable in matplotlib (Widget.ignore() only checks .active,
+    #     not visibility) -- so one real click could reach two overlapping
+    #     Buttons, both try to grab_mouse, and the second one collides.
+    app8 = BuilderApp()
+    app8._set_tool("C")
+    app8._place((0, 0), (1, 0))
+    app8._set_tool("SELECT")
+    _click(app8, 0.5, 0)                      # real canvas-click selection,
+    assert app8.selected == 0                 # like the user's own repro
+    assert app8.src_btns["AC"].active is False and \
+        app8.box_freq.active is False, \
+        "overlapping source/freq widgets must be deactivated, not just hidden"
+
+    canvas8 = app8.fig.canvas
+
+    def _click_widget(btn, frac=0.15):
+        # frac=0.15 (near the button's left edge, not dead center) matters:
+        # Q's axes rect is wide enough that its exact center falls in the
+        # gap between the (overlapping, hidden) AC/DC buttons underneath
+        # it, which would make this test pass even without the fix -- an
+        # off-center click is what actually lands inside the overlap.
+        x, y = btn.ax.transAxes.transform((frac, 0.5))
+        canvas8.callbacks.process(
+            "button_press_event",
+            MouseEvent("button_press_event", canvas8, x, y, button=1))
+        canvas8.callbacks.process(
+            "button_release_event",
+            MouseEvent("button_release_event", canvas8, x, y, button=1))
+
+    _click_widget(app8.probe_btns["Q"])       # must not raise
+    assert 0 in app8.probes_q
+    _click_widget(app8.probe_btns["E"])       # must not raise
+    assert 0 in app8.probes_e
+    print("builder : overlapping hidden widgets don't intercept clicks on "
+          "the visible one OK")
+
+    # 13) the Energy axis (a twinx() of the charge chart) must stay on the
+    #     right after a redraw -- cla() resets a twin axes back to the
+    #     default left-side tick/label position, undoing what twinx() set
+    #     up at construction time, unless every redraw re-asserts it
+    app._redraw_charts()
+    app._redraw_charts()                      # twice: catches a fix that
+    assert app.ax_e.yaxis.label_position == "right"   # only survives once
+    assert app.ax_e.yaxis.get_ticks_position() == "right"
+    print("builder : Energy axis stays right-aligned across redraws OK")
 
     app.fig.savefig(out, dpi=110)
     print("saved   :", out)

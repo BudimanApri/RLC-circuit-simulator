@@ -1,0 +1,152 @@
+{
+  "netlist": {
+    "ground": "0",
+    "components": [
+      {
+        "kind": "R",
+        "node_a": "n3_6",
+        "node_b": "n4_6",
+        "value": 1000.0,
+        "name": "R1",
+        "source_type": "AC",
+        "freq": 377.0
+      },
+      {
+        "kind": "L",
+        "node_a": "n4_6",
+        "node_b": "n5_6",
+        "value": 1.0,
+        "name": "L1",
+        "source_type": "AC",
+        "freq": 377.0
+      },
+      {
+        "kind": "C",
+        "node_a": "n5_6",
+        "node_b": "0",
+        "value": 1e-06,
+        "name": "C1",
+        "source_type": "AC",
+        "freq": 377.0
+      },
+      {
+        "kind": "VSRC",
+        "node_a": "n3_6",
+        "node_b": "0",
+        "value": 120.0,
+        "name": "VSRC1",
+        "source_type": "AC",
+        "freq": 377.0
+      }
+    ]
+  },
+  "placements": [
+    {
+      "kind": "R",
+      "p1": [
+        3,
+        6
+      ],
+      "p2": [
+        4,
+        6
+      ],
+      "value": 1000.0,
+      "name": "R1",
+      "source_type": "AC",
+      "freq": 377.0
+    },
+    {
+      "kind": "L",
+      "p1": [
+        4,
+        6
+      ],
+      "p2": [
+        5,
+        6
+      ],
+      "value": 1.0,
+      "name": "L1",
+      "source_type": "AC",
+      "freq": 377.0
+    },
+    {
+      "kind": "C",
+      "p1": [
+        5,
+        6
+      ],
+      "p2": [
+        6,
+        6
+      ],
+      "value": 1e-06,
+      "name": "C1",
+      "source_type": "AC",
+      "freq": 377.0
+    },
+    {
+      "kind": "VSRC",
+      "p1": [
+        3,
+        6
+      ],
+      "p2": [
+        3,
+        5
+      ],
+      "value": 120.0,
+      "name": "VSRC1",
+      "source_type": "AC",
+      "freq": 377.0
+    }
+  ],
+  "wires": [
+    [
+      [
+        3,
+        5
+      ],
+      [
+        4,
+        5
+      ]
+    ],
+    [
+      [
+        4,
+        5
+      ],
+      [
+        5,
+        5
+      ]
+    ],
+    [
+      [
+        5,
+        5
+      ],
+      [
+        6,
+        5
+      ]
+    ],
+    [
+      [
+        6,
+        5
+      ],
+      [
+        6,
+        6
+      ]
+    ]
+  ],
+  "ground": [
+    3,
+    5
+  ],
+  "T_ms": 80.0
+}
