@@ -14,18 +14,31 @@ Every topology in both families can be driven by an **AC** source
 (E₀·sin(ωt)) or a **DC** step (E₀ applied at t = 0), producing the classic
 charging/discharging curves from circuit theory.
 
+Underneath the fixed-preset UI, a general-purpose netlist engine (Milestone
+3) can simulate **any** R/L/C/source network — see
+[General netlist engine](#general-netlist-engine-milestone-3) below — and
+on top of *that*, a free-form **circuit builder** (Milestone 4,
+`rlc_builder.py`) lets you place and wire components on a grid instead of
+picking from the 9 fixed presets — see
+[Free-form circuit builder](#free-form-circuit-builder-milestone-4) below.
+
 ## Running
 
 ```
-python rlc_simulator.py
+python rlc_simulator.py    # fixed-preset simulator (series + parallel)
+python rlc_builder.py      # free-form circuit builder
 ```
 
 Requires `numpy` and `matplotlib` (`pip install numpy matplotlib`).
+`scipy` is optional but recommended — if present, the general netlist
+engine (see below) solves noticeably faster; without it, it still works,
+just slower.
 
-Headless test mode (numeric verification + screenshots of every topology):
+Headless test mode (numeric verification + screenshots):
 
 ```
 python rlc_simulator.py --test output.png
+python rlc_builder.py --test output.png
 ```
 
 ## Controls
@@ -127,6 +140,85 @@ the 5τ transient marker works the same way as in series mode. Steady-state
 overlay, RK4 verification, and the transient envelope are series-only for
 now (see [ROADMAP.md](ROADMAP.md)).
 
+## General netlist engine (Milestone 3)
+
+Underneath the app's fixed presets there is a genuinely general circuit
+solver: build **any** network of resistors, inductors, capacitors, and
+voltage/current sources, and simulate it — not just the 9 topologies the
+fixed-preset UI exposes. [`rlc_builder.py`](#free-form-circuit-builder-milestone-4)
+is the interactive UI on top of it; you can also drive it directly from
+Python:
+
+```python
+from rlc_netlist import Netlist
+from rlc_mna import simulate, probe_voltage, probe_current, probe_charge
+import numpy as np
+
+nl = Netlist()
+nl.add("VSRC", "in", "0", 120.0, name="E", source_type="AC", freq=377.0)
+nl.add("R", "in", "mid", 1000.0)
+nl.add("L", "mid", "out", 3.5)
+nl.add("C", "out", "0", 2e-6)
+
+t = np.linspace(0, 0.08, 4000)
+result = simulate(nl, t)
+
+v_mid = probe_voltage(result, "mid")
+i_r1 = probe_current(result, "R1")
+q_c1 = probe_charge(result, "C1")
+```
+
+It solves via trapezoidal **Modified Nodal Analysis** (the same method
+SPICE uses): node voltages plus one branch-current unknown per voltage
+source, with inductors and capacitors reduced to a companion
+(conductance + history current source) model each step. Save/share a
+circuit with `Netlist.to_json()` / `Netlist.from_json()`.
+
+**Verified**, not just written: cross-checked against all 9 existing
+closed-form presets (5 series + 4 parallel) × AC/DC, matching to within
+~10⁻⁴ relative error — consistent with the expected 2nd-order trapezoidal
+discretization error, permanently re-run in `--test`. `probe_energy()`
+also reports stored energy in any L/C and cumulative dissipated energy in
+any R. See [ROADMAP.md](ROADMAP.md) for the performance numbers and the
+one real bug this uncovered along the way.
+
+## Free-form circuit builder (Milestone 4)
+
+```
+python rlc_builder.py
+```
+
+A standalone editor: place components on a snapped grid, wire them
+together, and see the result update live — no longer limited to the 9
+fixed presets above.
+
+**Palette:** `R  L  C  VSRC  ISRC  WIRE  GROUND  SELECT  DELETE`
+
+1. Pick a tool, then click a grid point and an **adjacent** grid point to
+   place that component between them (one grid step, horizontally or
+   vertically — whichever direction you click determines the orientation,
+   there's no separate rotate step). Clicking a non-adjacent point just
+   moves your anchor there instead of placing anything.
+2. **Ground**: click any grid point to make it "0" — the reference every
+   voltage is measured against.
+3. **Select**: click a component to edit its value (and, for VSRC/ISRC,
+   toggle AC/DC and set ω) in the PROPERTIES card, and to toggle its
+   current into the RESULTS charts. Click a bare grid point to toggle its
+   voltage into the results instead.
+4. **Delete**: click a component or wire to remove it.
+5. **Save JSON** / **Load JSON**: write or read back the circuit
+   (`Netlist.to_json()`/`from_json()` under the hood) via a normal file
+   picker.
+
+The circuit resolves automatically after every edit as soon as it has a
+ground and a source and validates — before that, the CIRCUIT card tells
+you what's missing in plain language rather than failing silently or
+crashing.
+
+For a source's polarity: whichever grid point you click **first** is its
+"+" terminal (VSRC) or the direction current flows away from (ISRC) — the
+same node_a/node_b convention the netlist engine uses everywhere.
+
 ## Display elements
 
 - **Transient → steady-state marker**: the transient region is shaded orange
@@ -153,6 +245,10 @@ now (see [ROADMAP.md](ROADMAP.md)).
 | `rlc_solver.py` | Exact analytic solutions, series and parallel, + RK4 check (pure numpy) |
 | `rlc_schematic.py` | Circuit schematics — series (`Schematic`) and parallel (`ParallelSchematic`) |
 | `rlc_config.py` | Shared constants: defaults, input bounds, theme, topologies |
+| `rlc_netlist.py` | General netlist data model: `Component`, `Netlist`, JSON round-trip (pure Python) |
+| `rlc_mna.py` | General trapezoidal-MNA transient solver + probes API (pure numpy, optional scipy for speed) |
+| `rlc_builder.py` | Free-form circuit builder: standalone app + its own `--test` mode |
 
-See [ROADMAP.md](ROADMAP.md) for the development plan (a general netlist
-solver, a free-form circuit builder, per-node/per-branch probes).
+See [ROADMAP.md](ROADMAP.md) for the development plan and what's left
+(undo/redo, short-circuit warnings, a charge/energy probe toggle — see its
+backlog section).

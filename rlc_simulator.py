@@ -59,6 +59,10 @@ from rlc_config import (DEF, TOPO_ORDER, TOPOS, PARALLEL_ORDER,   # noqa: E402
                         PARALLEL_TOPOS, PARALLEL_I0_DEFAULT)
 from rlc_solver import (solve, solve_rk4, solve_parallel,         # noqa: E402
                         solve_parallel_rk4)
+from rlc_netlist import (Netlist, series_netlist,                 # noqa: E402
+                         parallel_netlist)
+from rlc_mna import (simulate as mna_simulate, probe_voltage,     # noqa: E402
+                     probe_current, probe_charge)
 from rlc_app import RLCApp                                         # noqa: E402
 
 
@@ -142,6 +146,73 @@ def _self_test(app):
     rv = float(np.max(np.abs(rk[0] - psol["I_L"]))) / PARALLEL_I0_DEFAULT
     assert rv < 1e-9, rv
     print("parallel: R∥L with R=0 edge case OK")
+
+    # 2c) general MNA netlist engine (Milestone 3): netlist JSON round-trip,
+    #     then cross-check the trapezoidal-MNA solver against every one of
+    #     the 9 exact closed-form presets (5 series + 4 parallel) x AC/DC —
+    #     this is the real proof the general engine reproduces everything
+    #     the specialized solvers already know
+    nl_rt = series_netlist("RLC", R, L, C, E0, w, mode="AC")
+    nl_rt2 = Netlist.from_json(nl_rt.to_json())
+    assert nl_rt2.to_dict() == nl_rt.to_dict()
+    print("netlist : JSON round-trip OK")
+
+    t_mna = np.linspace(0, 0.08, 4000)
+    for mode in ("AC", "DC"):
+        for topo in TOPO_ORDER:
+            nl = series_netlist(topo, R, L, C, E0, w, mode=mode)
+            res = mna_simulate(nl, t_mna)
+            sol = solve(topo, R, L, C, E0, w, t_mna, mode=mode)
+            first = nl.components[1].name        # [0] is the VSRC
+            rI = float(np.max(np.abs(probe_current(res, first) - sol["I"]))) \
+                / max(float(np.max(np.abs(sol["I"]))), 1e-15)
+            assert rI < 5e-3, ("MNA series", topo, mode, rI)
+            if any(c.kind == "C" for c in nl.components):
+                cname = next(c.name for c in nl.components if c.kind == "C")
+                rQ = float(np.max(np.abs(probe_charge(res, cname)
+                                         - sol["Q"]))) \
+                    / max(float(np.max(np.abs(sol["Q"]))), 1e-15)
+                assert rQ < 5e-3, ("MNA series", topo, mode, rQ)
+    print("MNA     : series topologies (5 x AC/DC) match the exact "
+          "solver OK")
+
+    for preset in PARALLEL_ORDER:
+        amp = E0 if preset == "TANK" else PARALLEL_I0_DEFAULT
+        for mode in ("AC", "DC"):
+            nl = parallel_netlist(preset, R, L, C, amp, w, mode=mode)
+            res = mna_simulate(nl, t_mna)
+            sol = solve_parallel(preset, R, L, C, amp, w, t_mna, mode=mode)
+            vnode = "n1" if preset == "TANK" else "n0"
+            rV = float(np.max(np.abs(probe_voltage(res, vnode)
+                                     - sol["V"]))) \
+                / max(float(np.max(np.abs(sol["V"]))), 1e-15)
+            assert rV < 5e-3, ("MNA parallel", preset, mode, rV)
+    print("MNA     : parallel presets (4 x AC/DC) match the exact "
+          "solver OK")
+
+    # performance smoke check: a ~20-component ladder network must still
+    # complete a typical sweep in bounded time (generous bound — this is a
+    # sanity check against a hang/blowup, not a strict perf gate, since
+    # wall-clock speed varies by machine)
+    import time as _time
+    nl_perf = Netlist()
+    nl_perf.add("VSRC", "n0", "0", 120.0, name="E", source_type="AC",
+               freq=377.0)
+    node = "n0"
+    for i in range(6):
+        a, b = node, f"n{i + 1}"
+        nl_perf.add("R", a, b, 200.0 + i * 30)
+        nl_perf.add("L", b, "0", 0.5 + i * 0.1)
+        nl_perf.add("C", b, "0", 1e-6 * (1 + i * 0.3))
+        node = b
+    assert len(nl_perf.components) == 19
+    t_perf = np.linspace(0, 0.08, 3000)
+    t0 = _time.perf_counter()
+    mna_simulate(nl_perf, t_perf)
+    dt_perf = _time.perf_counter() - t0
+    print(f"MNA     : 19-component / 3000-step sweep in {dt_perf * 1000:.0f} "
+          f"ms ({1.0 / dt_perf:.1f} recomputes/sec)")
+    assert dt_perf < 5.0, dt_perf
 
     # 3) assignment answer numbers (default RLC)
     sol = solve("RLC", R, L, C, E0, w, t)

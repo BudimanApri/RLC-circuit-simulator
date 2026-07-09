@@ -3,7 +3,7 @@
 Where this project is heading, split into milestones that are each usable and
 testable on their own. Update the checkboxes as work lands.
 
-## Current state (v5 — July 2026)
+## Current state (v7 — July 2026)
 
 - [x] Exact analytic simulation of the series **RLC / RL / RC / LC / R**
       topologies with zero initial state
@@ -34,25 +34,47 @@ testable on their own. Update the checkboxes as work lands.
       all parallel presets × both source types, KVL/KCL checks, V_L =
       L·dI/dt check, widget round-trips (AC/DC toggle, family toggle),
       per-topology and per-preset screenshots
+- [x] **General MNA netlist engine** (Milestone 3, v6): `rlc_netlist.py` +
+      `rlc_mna.py` — an arbitrary R/L/C/VSRC/ISRC netlist can now be
+      simulated by trapezoidal Modified Nodal Analysis instead of only the
+      9 fixed presets. Cross-validated against every one of those 9 presets
+      (max relative error ~10⁻⁴, consistent with 2nd-order trapezoidal
+      accuracy).
+- [x] **Free-form circuit builder** (Milestone 4, v7): `rlc_builder.py` —
+      a standalone app (`python rlc_builder.py`) that puts a UI on top of
+      the Milestone 3 engine. Place R/L/C/VSRC/ISRC on a snapped grid,
+      wire them with click-click placement (no dragging), pick a ground,
+      probe any node's voltage or component's current, edit values and
+      source type/frequency live, save/load as JSON. Resolves
+      automatically after every edit. See its own section below.
 
 ## Design position: should we build a free-form circuit builder?
 
-**Yes — as the end goal, reached in stages.** Building it in one jump would
-mean replacing the physics engine, the data model, and the UI at the same
-time, which is where projects stall. The staged plan below keeps the app
-working at every step:
+**Yes, and it's now done (Milestone 4, v7).** Building it in one jump would
+have meant replacing the physics engine, the data model, and the UI at the
+same time, which is where projects stall — so it happened in stages instead,
+each one usable and tested on its own:
 
-- The current engine solves **one fixed ODE family** in closed form. That is
-  exact and fast, but it cannot describe an arbitrary R/L/C network.
-- A free-form builder needs a **netlist** data model ("component X connects
-  node a to node b") and a **general solver** — the standard approach is
-  Modified Nodal Analysis (MNA) with a small implicit time-stepper, which is
-  how SPICE-class simulators work. Once that engine exists, "parallel
-  circuits" is not a special case anymore: *any* wiring works.
-- Per-branch currents and per-node voltages fall out of MNA naturally, which
-  is exactly the "probe every point of the circuit" feature you described —
-  in a parallel circuit each branch has its own I, V, and (for capacitors) Q,
-  so the charts must become probe-driven rather than single-trace.
+- The original engine solved **one fixed ODE family** per topology in
+  closed form. Exact and fast, but it couldn't describe an arbitrary R/L/C
+  network.
+- A free-form builder needed a **netlist** data model ("component X connects
+  node a to node b") and a **general solver** — Modified Nodal Analysis
+  (MNA) with a trapezoidal time-stepper, how SPICE-class simulators work.
+  `rlc_netlist.py` and `rlc_mna.py` (Milestone 3) are exactly that, and are
+  validated against every fixed preset the app knows. "Parallel circuits"
+  (or any other wiring) is no longer a special case requiring bespoke
+  algebra — it's just a different netlist.
+- Per-branch currents and per-node voltages fall out of MNA naturally,
+  which is exactly the "probe every point of the circuit" feature that
+  motivated this — the probes API existed before any picking UI did, and
+  `rlc_builder.py` (Milestone 4) is that UI: a grid-based editor where you
+  place, wire, ground, and probe an arbitrary circuit, with results
+  updating live.
+
+What's left (see Milestone 4's "deferred to backlog" note and the backlog
+section below) is refinement — undo/redo, short-circuit detection, a UI
+toggle for charge/energy probes — not anything architectural.
 
 ## Milestone 1 — AC/DC source toggle *(small step, high value)* — DONE (v4)
 
@@ -110,46 +132,132 @@ generic on `alpha_settle` and was extracted into a shared
 there's a concrete request; the DISPLAY & CONTROLS checkboxes already exist
 but are inert while `family == "Parallel"`.
 
-## Milestone 3 — General circuit engine (MNA netlist solver)
+## Milestone 3 — General circuit engine (MNA netlist solver) — DONE (v6)
 
 The enabler for everything after it.
 
-- [ ] Data model: `Component(kind, value, node_a, node_b)` + `Netlist`
-      (components, ground node); serializable to/from JSON so circuits can
-      be saved and shared
-- [ ] MNA assembly (conductance matrix + sources) with companion models for
-      L and C; trapezoidal integration (stable, 2nd-order accurate)
-- [ ] Probes API: voltage at any node, current through any branch, charge on
-      any capacitor, energy per component
-- [ ] Keep the existing closed-form engines (5 series + 4 parallel presets;
-      exact formulas remain the "Solution" panel feature) and use them +
-      RK4 to cross-validate the MNA engine in tests
-- [ ] Performance target: interactive slider dragging at ≥ 20 fps for
-      circuits up to ~20 components (vectorized numpy, LU factorization
-      reuse while the timestep is constant)
+- [x] Data model (`rlc_netlist.py`): `Component(kind, node_a, node_b, value,
+      name, source_type, freq)` for R/L/C/VSRC/ISRC + `Netlist(components,
+      ground)`; JSON round-trip via `to_json()`/`from_json()`; a cheap
+      `validate()` catches floating nodes / self-shorts before they'd
+      otherwise surface as a singular matrix; `series_netlist()` /
+      `parallel_netlist()` build netlists matching every existing preset,
+      used by the cross-validation tests
+- [x] MNA assembly (`rlc_mna.py`): conductance stamps for R plus trapezoidal
+      companion models for L and C (`Geq_C=2C/h, Geq_L=h/(2L)` with a
+      history current source each), an extra branch-current unknown per
+      voltage source (the "modified" part of MNA); a dedicated t=0 initial
+      solve (`h → 0` limit: capacitors become 0V shorts, inductors become
+      opens) matching this app's Q(0)=0/I(0)=0 convention everywhere else —
+      this was the one real bug caught during development (see below)
+- [x] Probes API: `probe_voltage(result, node)`, `probe_current(result,
+      component_name)`, `probe_charge(result, capacitor_name)`,
+      `probe_energy(result, component_name)` (stored energy for L/C,
+      cumulative trapezoidal-integrated dissipation for R)
+- [x] Cross-validated against all 9 existing closed-form presets (5 series +
+      4 parallel) × AC/DC = 18 combinations, permanently in
+      `rlc_simulator.py --test`; max relative error ~1.4×10⁻⁴ (the LC/R∥L∥C
+      undamped cases, expected — no damping to smooth out discretization
+      noise), typically ~10⁻⁶. A 4-panel overlay plot (MNA dots on the
+      exact curves, indistinguishable by eye) served as the visual proof.
+- [x] Performance: vectorized per-kind-of-component (not per-component)
+      RHS assembly + raw LAPACK `getrs` (bypassing scipy's `lu_solve`
+      wrapper, ~4-5x faster for matrices this small) got a 19-component
+      circuit to **~20 recomputes/sec at 3000 samples** (this app's
+      minimum resolution) — at or near the 20fps target for typical use.
+      Degrades for high-resolution sweeps (~1/sec at 48000 samples, the
+      app's max) since per-step cost turned out to be dominated by fixed
+      Python/numpy dispatch overhead rather than component count — profiled
+      and documented in `rlc_mna.py`'s module docstring. Good enough to
+      proceed; revisit only once Milestone 4 actually wires this into live
+      slider dragging and it's a felt problem, not a hypothetical one.
 
-## Milestone 4 — Free-form circuit builder UI
+**The one real bug found:** the first implementation solved every sample
+including t=0 through the same trapezoidal step, which for a source that's
+already "on" at t=0 (DC step, or `sin(0)=0` for AC — no issue there)
+produced a nonzero Q(0) instead of the exact 0 every closed-form solver
+assumes. Standard SPICE behavior — and the fix — is to treat t=0 as a
+separate operating-point solve, not one more trapezoidal step from a
+fictitious t=-h.
 
-- [ ] Grid-based editor canvas: place / rotate / delete components from a
-      palette (R, L, C, AC/DC source, wire), click-drag wiring with
-      automatic node detection
-- [ ] Probe tool: click any node or component to add it to the charts; each
-      probe gets a color and a legend entry; charts show V/I/Q per probe
-      instead of one global trace
-- [ ] Component value editing via the existing slider + numeric box pattern
-      (select a component → its value binds to the controls)
-- [ ] Validation & niceties: dangling-wire detection, short-circuit warnings,
-      undo/redo, save/load circuit JSON
-- [ ] UI technology decision: matplotlib widgets can carry an MVP (the
-      current card layout already proves it), but if the editor outgrows it,
-      the solver/netlist modules stay unchanged and only the view layer is
-      swapped (e.g. a small web front-end talking to the same Python engine)
+## Milestone 4 — Free-form circuit builder UI — DONE (v7)
+
+The engine (`rlc_netlist.Netlist` + `rlc_mna.simulate`) already existed and
+was tested — this milestone was purely UI: `rlc_builder.py` produces a
+`Netlist` from user interaction and hands it to `simulate()`.
+
+- [x] Grid-based editor canvas (`BuilderApp` in `rlc_builder.py`): a palette
+      of 9 tools (R, L, C, VSRC, ISRC, Wire, Ground, Select, Delete); place
+      and delete components on a snapped grid. **No separate rotate step**
+      — orientation is implicit from which adjacent grid point you click
+      second (a deliberate simplification, see design note below). Node
+      detection is automatic: components sharing a grid point automatically
+      share a netlist node, and the Wire tool explicitly merges two grid
+      points (via union-find) for routing around
+- [x] Probe tool: with the Select tool, clicking a component toggles its
+      current into the results (and lets you edit its value/source type/
+      frequency); clicking a bare grid point toggles that node's voltage.
+      Two charts (voltage, current) update live with a color-coded legend
+      per probe. Charge probing (`probe_charge`) exists in the engine but
+      has no UI toggle yet — see backlog
+- [x] Component value editing: a `TextBox` for the value (not the slider
+      pattern from the fixed-preset apps — free-form component values don't
+      fit a bounded slider range), plus AC/DC buttons and a frequency box
+      for sources, shown/hidden contextually
+- [x] Validation: `Netlist.validate()` surfaces as a plain-English status
+      message ("Add a ground reference…", "Not solvable yet: floating
+      node(s)…") instead of a crash or a silent wrong answer. Save/load via
+      `Netlist.to_json()`/`from_json()`, using a real OS file dialog
+      (`tkinter.filedialog`) with a headless-safe fallback for `--test`
+- [x] Tests: `rlc_builder.py --test` drives the *real* click-dispatch code
+      path (`_on_click`, not internal methods directly) to build a series
+      RLC circuit from scratch and checks it against the exact closed-form
+      solver (~5×10⁻⁵ relative error — consistent with the coarser default
+      2000-sample grid), plus probe toggling, source editing, delete,
+      save/load round-trip, and validation-message coverage for every
+      incomplete-circuit state
+
+**Design decision — click-click wiring, not click-drag:** true continuous
+dragging needs a fair amount of custom motion-tracking state in matplotlib
+(which has no native drag-and-drop primitive) for a payoff that a two-click
+model gets almost all of: click a grid point, click an *adjacent* one, done
+— and a non-adjacent second click just relocates the anchor rather than
+erroring, which turned out forgiving enough in testing that a drag would
+add complexity without adding much usability. This also sidesteps rotation
+entirely: whichever adjacent point you pick determines horizontal vs.
+vertical automatically.
+
+**Bug caught during testing:** the first version of `_place()` auto-selected
+*and* auto-probed every newly-placed component (selecting for editing was
+supposed to be a convenience; toggling the probe was meant only for a
+deliberate click on an existing component). The result: by the time a
+circuit was fully built, every single component was probed as a side effect
+— not wrong data, just a confusing default. Fixed by splitting
+`_select_for_edit()` (editing only, used right after placement) from
+`_select()` (editing *and* probe toggle, used by Select-tool clicks).
+
+**Deferred to backlog:** undo/redo, short-circuit warnings (`validate()`
+only catches floating nodes today, not e.g. a wire directly shorting a
+source), a UI toggle for charge/energy probes, and a from-scratch
+performance re-check under sustained interactive use (each click-triggered
+resolve is a single small circuit, not the ~20-component stress case from
+Milestone 3, so no slowdown was observed in testing — but it wasn't
+rigorously profiled here either).
 
 ## Backlog / nice-to-haves (any time)
 
 - [ ] Steady-state overlay, RK4 verification overlay, and transient envelope
       for the parallel family (deferred from Milestone 2 — see its notes)
-- [ ] Energy view: energy stored in L and C, energy dissipated in R over time
+- [ ] Builder: undo/redo for placements/wires/deletes
+- [ ] Builder: short-circuit warnings (`Netlist.validate()` only catches
+      floating nodes today, not e.g. a wire directly shorting a source)
+- [ ] Builder: a UI toggle to probe charge (`probe_charge`) and energy
+      (`probe_energy`) — both already exist in `rlc_mna.py`, just not
+      exposed as a click target yet, unlike voltage/current
+- [ ] Builder: rigorous interactive-latency profiling under sustained real
+      use (not just the single-resolve-per-click cases exercised by
+      `--test`) — revisit `rlc_mna.py`'s per-step cost (Milestone 3 notes)
+      if this ever becomes a felt problem
 - [ ] Export: CSV of traces, one-click PNG of the figure
 - [ ] Phasor diagram with rotating vectors (animated at reduced speed)
 - [ ] Preset save/load for parameter sets
@@ -157,14 +265,22 @@ The enabler for everything after it.
 
 ## Architecture notes for contributors
 
-- `rlc_solver.py` is pure numpy (no matplotlib) — keep it that way so engines
-  can be tested headlessly and reused by a future web UI.
-- Every new physics path must ship with a cross-check test in
-  `rlc_simulator.py --test` (analytic vs RK4 today; MNA vs RK4 later).
-  The KVL/KCL identity and V_L = L·dI/dt style checks are cheap and catch
-  sign errors early.
-- UI layout is hand-tuned figure coordinates in `rlc_app.py`; after any
-  layout change, re-render the `--test` screenshots and inspect them.
+- `rlc_solver.py`, `rlc_netlist.py`, and `rlc_mna.py` are all pure numpy (no
+  matplotlib) — keep it that way so engines can be tested headlessly and
+  reused by a future web UI.
+- Every new physics path must ship with a cross-check test (closed-form vs
+  RK4 in `rlc_simulator.py --test`; closed-form vs MNA there too; and
+  click-built-circuit vs closed-form in `rlc_builder.py --test`). The
+  KVL/KCL identity and V_L = L·dI/dt style checks are cheap and catch sign
+  errors early; for MNA specifically, remember the t=0 initial-condition
+  solve is a *separate* system from the ongoing trapezoidal sweep (see
+  Milestone 3 notes) — a new component kind needs its own `hstep -> 0`
+  limiting behavior worked out, not just its steady-state companion model.
+- UI layout is hand-tuned figure coordinates in both `rlc_app.py` and
+  `rlc_builder.py`; after any layout change, re-render the `--test`
+  screenshots and inspect them — cramped card spacing (title text
+  overlapping content) is the most common regression, easy to miss without
+  actually looking at the PNG.
 - `rlc_app.py` dispatches on `self.family` ("Series"/"Parallel") at a small
   number of chokepoints — `recompute()`, `_draw_upto()`, `_place_cursor()` —
   each delegating to a `_series`/`_parallel` sibling method. Series-mode
@@ -177,3 +293,12 @@ The enabler for everything after it.
   sinusoidal phase (not just sin) or an arbitrary post-step derivative (not
   just 0), reach for `solve_second_general()` before writing a bespoke
   solver — it already backs both R∥L∥C and Tank.
+- `rlc_builder.py` tests should drive `BuilderApp._on_click` (via a fake
+  event object with `.inaxes`/`.xdata`/`.ydata`) rather than calling
+  internal methods like `_place`/`_select` directly — the dispatch logic
+  itself (tool routing, grid snapping, adjacency checks, hit-testing) is
+  exactly what's most likely to have bugs, and calling internals only
+  bypasses it. When toggling something as a side effect of another action
+  (e.g. `_place()` selecting the new component), think about whether that
+  side effect should compose with *every* caller — it shouldn't always
+  (see the auto-probe bug in Milestone 4's notes).

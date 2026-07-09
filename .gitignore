@@ -108,3 +108,7 @@ venv.bak/
 # OS metadata
 .DS_Store
 Thumbs.db
+
+.ROADMAP.md
+.CONTEXT_HANDOFF.md
+.gitignore
