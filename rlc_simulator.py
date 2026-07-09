@@ -14,7 +14,7 @@ forced directly across parallel branches would decouple them entirely).
 Tank (R in series with an L∥C tank) stays voltage-driven since R is
 genuinely in series with the source there.
 
-Assignment defaults (series RLC topology):
+Defaults (series RLC topology):
     R = 1000 Ω,  L = 3.5 H,  C = 2×10⁻⁶ F,  E(t) = 120·sin(377·t) Volt
 
 How to run:
@@ -26,7 +26,7 @@ Controls:
     [AC][DC]         : choose the source type (sinusoidal vs. a step at t=0)
     [Play] / space   : animate the curves (screen-recording)
     [1×] [2×] [4×]   : animation speed (or keyboard keys 1 / 2 / 4)
-    [Reset] / 'r'    : restore every parameter to the assignment values
+    [Reset] / 'r'    : restore every parameter to the default values
     Sliders          : vary R, L, C, the amplitude, ω, and the time span
                        (the amplitude slider is volts for Series/Tank and
                        amps for the current-driven parallel presets)
@@ -214,7 +214,7 @@ def _self_test(app):
           f"ms ({1.0 / dt_perf:.1f} recomputes/sec)")
     assert dt_perf < 5.0, dt_perf
 
-    # 3) assignment answer numbers (default RLC)
+    # 3) the answer numbers (default RLC)
     sol = solve("RLC", R, L, C, E0, w, t)
     print("damping :", sol["damping"])
     print("alpha   :", sol["alpha"], " wd:", sol.get("wd"))

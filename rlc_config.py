@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Shared configuration: assignment defaults, input bounds, theme, topologies."""
+"""Shared configuration: defaults, input bounds, theme, topologies."""
 
-# Assignment values: C in µF, T (time span) in ms
+# Default values: C in µF, T (time span) in ms
 DEF = dict(R=1000.0, L=3.5, C=2.0, E0=120.0, W=377.0, T=80.0)
 
 # Physical bounds for typed input (wider than the slider ranges)

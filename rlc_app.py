@@ -304,8 +304,8 @@ class RLCApp:
             fontsize=8, ha="center", va="center", color=TH["sub"],
             linespacing=1.6, visible=False)
 
-        # ---- card: solution formulas (assignment answer) -----------------------------
-        self._card([0.030, 0.195, 0.955, 0.105], "SOLUTION  (ASSIGNMENT ANSWER)")
+        # ---- card: solution formulas -----------------------------
+        self._card([0.030, 0.195, 0.955, 0.105], "SOLUTION")
         self.fig.text(0.041, 0.2635, "●", fontsize=6, color=TH["q"])
         self.fig.text(0.041, 0.2375, "●", fontsize=6, color=TH["i"])
         self.txt_fq = self.fig.text(0.052, 0.260, "", fontsize=8.3,
