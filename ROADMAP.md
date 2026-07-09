@@ -3,7 +3,7 @@
 Where this project is heading, split into milestones that are each usable and
 testable on their own. Update the checkboxes as work lands.
 
-## Current state (v4 — July 2026)
+## Current state (v5 — July 2026)
 
 - [x] Exact analytic simulation of the series **RLC / RL / RC / LC / R**
       topologies with zero initial state
@@ -12,18 +12,28 @@ testable on their own. Update the checkboxes as work lands.
       topology (classic RC/RL charging curves, LC step ringing, RLC step
       response); ω slider disables in DC mode, equation text and impedance
       panel adapt
+- [x] **Parallel circuit family** (Milestone 2, v5): a Series/Parallel
+      toggle unlocks 4 presets — **R∥C, R∥L, R∥L∥C** (current-driven, the
+      dual of the series case) and **Tank** (R + an L∥C tank, voltage-
+      driven). R∥L∥C shows genuine parallel (anti)resonance; Tank shows the
+      notch/band-stop character of a resonant tank. The charts become
+      multi-trace (voltage, per-branch currents, charge on C), the
+      amplitude slider relabels itself V↔A automatically, and the
+      impedance panel shows |Zp|/phase for the two resonant presets
 - [x] Three synced charts: charge Q(t), current I(t), and **voltages**
       E(t), V_R, V_L, V_C (KVL-exact, color-matched to the schematic)
 - [x] Transient → steady-state marker (5τ, slowest decay mode), decay
-      envelope, steady-state overlay, RK4 verification overlay
+      envelope, steady-state overlay, RK4 verification overlay (series
+      family; parallel family has the 5τ marker only — see Milestone 2 notes)
 - [x] Impedance triangle, phase angle, resonance gauge, damping badge
       (AC-only; replaced by an explanatory note in DC mode)
 - [x] Sliders + exact numeric input, animation with 1×/2×/4× speed,
       hover readout, adaptive schematic
 - [x] English UI (translated from Indonesian in v3)
-- [x] Headless test suite: RK4 cross-check for all topologies × both source
-      types, KVL check, V_L = L·dI/dt check, widget round-trips (incl. the
-      AC/DC toggle), per-topology and per-source screenshots
+- [x] Headless test suite: RK4 cross-check for all series topologies and
+      all parallel presets × both source types, KVL/KCL checks, V_L =
+      L·dI/dt check, widget round-trips (AC/DC toggle, family toggle),
+      per-topology and per-preset screenshots
 
 ## Design position: should we build a free-form circuit builder?
 
@@ -56,21 +66,49 @@ working at every step:
 - [x] Tests: RK4 cross-check of every topology × source combination, incl.
       the pure-inductor (R=0) DC edge case
 
-## Milestone 2 — Fixed parallel topologies
+## Milestone 2 — Fixed parallel topologies — DONE (v5)
 
-- [ ] Preset list of common two-branch circuits, chosen from a second row of
-      topology buttons, e.g.:
-      - R ∥ C and R ∥ L (driven directly by the source)
-      - R in series with an L ∥ C tank (the classic resonant tank)
-      - R ∥ L ∥ C (parallel resonance / antiresonance)
-- [ ] Solver: these are still small linear ODE systems — keep closed-form
-      where practical, otherwise integrate numerically (this is a good
-      dress rehearsal for Milestone 3)
-- [ ] UI: charts become **multi-trace** — one current per branch with a
-      legend (I_total, I_R, I_L, I_C), per-branch voltage equal across
-      parallel branches; schematic gains parallel branch drawings
-- [ ] Analysis panel: parallel impedance Z_p = (1/Z₁ + 1/Z₂)⁻¹,
-      antiresonance indicator
+- [x] Preset list of common circuits, chosen from the same topology-button
+      row (relabeled per family):
+      - R∥C and R∥L — **current-driven** (see note below), 1st order, no
+        resonance
+      - R∥L∥C — current-driven, 2nd order, **true parallel antiresonance**
+      - Tank: R in series with an L∥C tank — voltage-driven, 2nd order,
+        notch/band-stop character
+- [x] Solver: closed-form for all four (no numeric-integration fallback was
+      needed — `solve_second_general` in `rlc_solver.py` generalizes the
+      2nd-order engine to arbitrary sinusoidal phase (AC) or an arbitrary
+      post-step initial derivative (DC), which both R∥L∥C and Tank reduce
+      to); RK4 cross-check still backs every preset in `--test`
+- [x] UI: charts become **multi-trace** — voltage (chart 1), branch
+      currents I_R/I_L/I_C/I_total with a legend (chart 2), charge on C
+      (chart 3, with a note when there's no capacitor); schematic gained
+      `ParallelSchematic` with vertical-branch drawings and a proper
+      current-source symbol
+- [x] Analysis panel: parallel impedance |Zp| and phase (via complex
+      admittance Yp = 1/R + j(ωC − 1/ωL), Zp = 1/Yp), resonance gauge reused
+      from the series panel, shown for R∥L∥C and Tank only
+
+**Design decision — current-source driving:** R∥C, R∥L, and R∥L∥C are
+driven by a current source, not the voltage source used everywhere else in
+this app. An ideal voltage source forced directly across parallel branches
+decouples them completely — no branch affects another, so R∥L∥C would show
+no resonance at all (verified this experimentally before committing to the
+current-source design; see the physics notes in `rlc_solver.py`). A current
+source is the standard dual of the series case and is what real "parallel
+resonance" circuit theory uses. Tank keeps a voltage source since R is
+genuinely in series with it there. This is also why the amplitude slider
+relabels itself (V↔A) when switching family/preset — implemented via
+`RLCApp._configure_amplitude_slider()`, which reconfigures a matplotlib
+`Slider`'s valmin/valmax/label in place (confirmed to work cleanly).
+
+**Deferred to a later pass:** steady-state overlay, RK4 verification
+overlay, and the transient-envelope band are series-family-only for now —
+the parallel `recompute()` path only wires up the 5τ marker (which is
+generic on `alpha_settle` and was extracted into a shared
+`_update_transient_marker()` helper). Re-enable these for parallel once
+there's a concrete request; the DISPLAY & CONTROLS checkboxes already exist
+but are inert while `family == "Parallel"`.
 
 ## Milestone 3 — General circuit engine (MNA netlist solver)
 
@@ -83,8 +121,8 @@ The enabler for everything after it.
       L and C; trapezoidal integration (stable, 2nd-order accurate)
 - [ ] Probes API: voltage at any node, current through any branch, charge on
       any capacitor, energy per component
-- [ ] Keep the existing closed-form engine for the five series presets
-      (exact formulas remain the "assignment answer" feature) and use it +
+- [ ] Keep the existing closed-form engines (5 series + 4 parallel presets;
+      exact formulas remain the "Solution" panel feature) and use them +
       RK4 to cross-validate the MNA engine in tests
 - [ ] Performance target: interactive slider dragging at ≥ 20 fps for
       circuits up to ~20 components (vectorized numpy, LU factorization
@@ -109,6 +147,8 @@ The enabler for everything after it.
 
 ## Backlog / nice-to-haves (any time)
 
+- [ ] Steady-state overlay, RK4 verification overlay, and transient envelope
+      for the parallel family (deferred from Milestone 2 — see its notes)
 - [ ] Energy view: energy stored in L and C, energy dissipated in R over time
 - [ ] Export: CSV of traces, one-click PNG of the figure
 - [ ] Phasor diagram with rotating vectors (animated at reduced speed)
@@ -121,7 +161,19 @@ The enabler for everything after it.
   can be tested headlessly and reused by a future web UI.
 - Every new physics path must ship with a cross-check test in
   `rlc_simulator.py --test` (analytic vs RK4 today; MNA vs RK4 later).
-  The KVL identity and V_L = L·dI/dt style checks are cheap and catch sign
-  errors early.
+  The KVL/KCL identity and V_L = L·dI/dt style checks are cheap and catch
+  sign errors early.
 - UI layout is hand-tuned figure coordinates in `rlc_app.py`; after any
   layout change, re-render the `--test` screenshots and inspect them.
+- `rlc_app.py` dispatches on `self.family` ("Series"/"Parallel") at a small
+  number of chokepoints — `recompute()`, `_draw_upto()`, `_place_cursor()` —
+  each delegating to a `_series`/`_parallel` sibling method. Series-mode
+  code is otherwise untouched by Milestone 2; new parallel-only artists
+  were added as a second, initially-hidden set on the *same* 3 axes rather
+  than new axes, so the two families share the transient-marker machinery.
+  Keep following this pattern rather than branching deep inside a shared
+  method — it made Milestone 2 safe to add without re-testing Milestone 1.
+- When a physics case needs a second-order response to an arbitrary
+  sinusoidal phase (not just sin) or an arbitrary post-step derivative (not
+  just 0), reach for `solve_second_general()` before writing a bespoke
+  solver — it already backs both R∥L∥C and Tank.

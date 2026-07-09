@@ -446,3 +446,398 @@ def solve_rk4(topo, R, L, Cuf, E0, w, t, mode="AC"):
         Earr = E0 * np.sin(w * t) if mode == "AC" else np.full_like(t, E0)
         I = (Earr - k * Q) / Rf
     return Q, I
+
+
+# =============================================================================
+# Parallel circuits (Milestone 2)
+#
+# R∥C, R∥L, R∥L∥C are driven by a CURRENT source I(t) — the dual of the
+# series case. An ideal *voltage* source forced directly across parallel
+# branches would decouple them completely (no branch affects another), which
+# is both non-standard and pedagogically flat, so a current source is used
+# instead — this is also what makes the true "antiresonance" of R∥L∥C show
+# up. Tank (R in series with an L∥C tank) stays voltage-driven since R is
+# genuinely in series with the source there.
+#
+# Every parallel solver returns a dict with keys:
+#     V, Vp           : node/tank voltage and its time-derivative (arrays)
+#     Src, src_kind    : the prescribed source waveform and "I" or "E"
+#     I_R, I_L, I_C    : branch currents (None where the branch is absent)
+#     I_total          : total current supplied by the source
+#     Q_C              : capacitor charge (None if no capacitor)
+#     alpha, alpha_settle, damping, wd / r1, r2 : same vocabulary as solve()
+#     Zp, phi_p (AC only) : magnitude/phase of the impedance the source sees
+#     w0 (2nd-order presets only) : natural frequency 1/√(LC)
+#     fV, fI           : formula strings for the "Solution" panel
+# =============================================================================
+
+def solve_second_general(Leff, Reff, keff, t, mode="AC", w=0.0, F0=0.0,
+                          phase=0.0, y0=0.0, yp0=0.0, yname="y"):
+    """General damped 2nd-order response:  Leff·y'' + Reff·y' + keff·y = F(t).
+
+    AC (mode="AC"): F(t) = F0·sin(wt + phase), with y(0)=0, y'(0)=0 forced
+    (the usual "switch closes at t=0" convention).
+
+    DC (mode="DC"): F(t) = 0 for t>0 (a pure homogeneous response), with the
+    given initial state y(0)=y0, y'(0)=yp0 — used to represent the
+    instantaneous KCL/KVL jump immediately after a step at t=0, which for
+    these parallel/tank circuits is generally nonzero even though y itself
+    starts at 0 (e.g. a capacitor voltage can't jump, but its slope can).
+
+    The damping classification (roots, α, ω_d) only depends on Leff, Reff,
+    keff — identical in structure to solve_second / solve_second_dc.
+    """
+    alpha = Reff / (2.0 * Leff)
+    disc = Reff * Reff - 4.0 * Leff * keff
+    scale = Reff * Reff + 4.0 * Leff * keff if keff > 0 else max(Reff * Reff, 1.0)
+
+    if mode == "AC":
+        D = max((keff - Leff * w * w) ** 2 + (Reff * w) ** 2, 1e-30)
+        cp, sp = math.cos(phase), math.sin(phase)
+        A = F0 * ((keff - Leff * w * w) * cp + Reff * w * sp) / D
+        B = F0 * ((keff - Leff * w * w) * sp - Reff * w * cp) / D
+        yss = A * np.sin(w * t) + B * np.cos(w * t)
+        ypss = A * w * np.cos(w * t) - B * w * np.sin(w * t)
+        q0, i0 = -B, -A * w
+    else:
+        A = B = 0.0
+        yss = np.zeros_like(t)
+        ypss = np.zeros_like(t)
+        q0, i0 = y0, yp0
+
+    sol = dict(alpha=alpha, w0=math.sqrt(keff / Leff) if keff > 0 else 0.0)
+
+    if disc < -1e-12 * scale:                        # underdamped
+        wd = math.sqrt(-disc) / (2.0 * Leff)
+        c1 = q0
+        c2 = (i0 + alpha * c1) / wd
+        e = np.exp(-alpha * t)
+        yh = e * (c1 * np.cos(wd * t) + c2 * np.sin(wd * t))
+        d1, d2 = c2 * wd - c1 * alpha, -(c1 * wd + c2 * alpha)
+        yph = e * (d1 * np.cos(wd * t) + d2 * np.sin(wd * t))
+        envh_y = math.hypot(c1, c2) * e
+        envh_yp = math.hypot(d1, d2) * e
+        alpha_settle = alpha
+        sol.update(damping="underdamped", wd=wd)
+        fy = (f"{yname}(t) = e^(-{_g(alpha)} t)·[{_g(c1)}·cos({_g(wd)} t)"
+              f"{_pm(c2)}·sin({_g(wd)} t)]"
+              + (f"{_pm(A)}·sin({_g(w)} t){_pm(B)}·cos({_g(w)} t)"
+                 if mode == "AC" else ""))
+    elif disc > 1e-12 * scale:                        # overdamped
+        sq = math.sqrt(disc) / (2.0 * Leff)
+        r1, r2 = -alpha + sq, -alpha - sq
+        c1 = (i0 - r2 * q0) / (r1 - r2)
+        c2 = q0 - c1
+        yh = c1 * np.exp(r1 * t) + c2 * np.exp(r2 * t)
+        yph = c1 * r1 * np.exp(r1 * t) + c2 * r2 * np.exp(r2 * t)
+        envh_y = abs(c1) * np.exp(r1 * t) + abs(c2) * np.exp(r2 * t)
+        envh_yp = abs(c1 * r1) * np.exp(r1 * t) + abs(c2 * r2) * np.exp(r2 * t)
+        alpha_settle = -r1
+        sol.update(damping="overdamped", r1=r1, r2=r2)
+        fy = (f"{yname}(t) = {_g(c1)}·e^({_g(r1)} t){_pm(c2)}·e^({_g(r2)} t)"
+              + (f"{_pm(A)}·sin({_g(w)} t){_pm(B)}·cos({_g(w)} t)"
+                 if mode == "AC" else ""))
+    else:                                             # critically damped
+        r = -alpha
+        c1 = q0
+        c2 = i0 - r * c1
+        e = np.exp(r * t)
+        yh = (c1 + c2 * t) * e
+        yph = (c2 + r * (c1 + c2 * t)) * e
+        envh_y = (abs(c1) + abs(c2) * t) * e
+        envh_yp = (abs(c2 + r * c1) + abs(r * c2) * t) * e
+        alpha_settle = alpha
+        sol.update(damping="critically damped", r1=r)
+        fy = (f"{yname}(t) = ({_g(c1)}{_pm(c2)}·t)·e^({_g(r)} t)"
+              + (f"{_pm(A)}·sin({_g(w)} t){_pm(B)}·cos({_g(w)} t)"
+                 if mode == "AC" else ""))
+
+    if alpha == 0:
+        sol["damping"] = "undamped (no damping)"
+
+    y = yh + yss
+    yp = yph + ypss
+    spread_y = (math.hypot(A, B) if mode == "AC" else 0.0) + envh_y
+    spread_yp = (math.hypot(A * w, B * w) if mode == "AC" else 0.0) + envh_yp
+    sol.update(y=y, yp=yp, env_y_hi=spread_y, env_y_lo=-spread_y,
+               env_yp_hi=spread_yp, env_yp_lo=-spread_yp,
+               alpha_settle=alpha_settle, fy=fy + f"   [Volt]")
+    return sol
+
+
+def solve_parallel_rc(R, Cuf, I0, w, t, mode="AC"):
+    """R∥C driven by a current source:  C·V' + V/R = I(t),  V(0)=0."""
+    Cf = Cuf * 1e-6
+    Rp, kp = Cf, 1.0 / max(R, 1e-9)
+    a1 = kp / Rp
+    if mode == "AC":
+        D = max(kp * kp + (Rp * w) ** 2, 1e-30)
+        A = I0 * kp / D
+        B = -I0 * Rp * w / D
+        Vss = A * np.sin(w * t) + B * np.cos(w * t)
+        Vpss = A * w * np.cos(w * t) - B * w * np.sin(w * t)
+        K = -B
+        e = np.exp(-a1 * t)
+        V = Vss + K * e
+        Vp = Vpss - K * a1 * e
+        envh = abs(K) * e
+        spread = math.hypot(A, B) + envh
+        fV = (f"V(t) = {_g(K)}·e^(-{_g(a1)} t){_pm(A)}·sin({_g(w)} t)"
+              f"{_pm(B)}·cos({_g(w)} t)   [Volt]")
+    else:
+        Vp_final = I0 / kp
+        e = np.exp(-a1 * t)
+        V = Vp_final * (1.0 - e)
+        Vp = Vp_final * a1 * e
+        envh = Vp_final * e
+        spread = envh
+        fV = f"V(t) = {_g(Vp_final)}·(1 − e^(-{_g(a1)} t))   [Volt]"
+
+    I_R = V / max(R, 1e-9)
+    I_C = Cf * Vp
+    Src = I0 * np.sin(w * t) if mode == "AC" else np.full_like(t, I0)
+    fI = f"I_C(t) = C·V′(t)   [Ampere]   (I_R(t) = V(t)/R)"
+    return dict(V=V, Vp=Vp, Src=Src, src_kind="I", I_R=I_R, I_L=None,
+                I_C=I_C, I_total=Src, Q_C=Cf * V,
+                alpha=a1, alpha_settle=a1, damping="1st-order (τ = RC)",
+                w0=0.0, env_y_hi=spread, env_y_lo=-spread,
+                fV=fV, fI=fI)
+
+
+def solve_parallel_rl(R, L, I0, w, t, mode="AC"):
+    """R∥L driven by a current source:  (L/R)·I_L' + I_L = I(t),  I_L(0)=0."""
+    Rr = max(R, 1e-9)
+    Rp, kp = L / Rr, 1.0
+    a1 = kp / Rp
+    if mode == "AC":
+        D = max(kp * kp + (Rp * w) ** 2, 1e-30)
+        A = I0 * kp / D
+        B = -I0 * Rp * w / D
+        ILss = A * np.sin(w * t) + B * np.cos(w * t)
+        ILpss = A * w * np.cos(w * t) - B * w * np.sin(w * t)
+        K = -B
+        e = np.exp(-a1 * t)
+        I_L = ILss + K * e
+        ILp = ILpss - K * a1 * e
+        envh = abs(K) * e
+        spread = math.hypot(A, B) + envh
+        fI = (f"I_L(t) = {_g(K)}·e^(-{_g(a1)} t){_pm(A)}·sin({_g(w)} t)"
+              f"{_pm(B)}·cos({_g(w)} t)   [Ampere]")
+    else:
+        IL_final = I0 / kp
+        e = np.exp(-a1 * t)
+        I_L = IL_final * (1.0 - e)
+        ILp = IL_final * a1 * e
+        envh = IL_final * e
+        spread = envh
+        fI = f"I_L(t) = {_g(IL_final)}·(1 − e^(-{_g(a1)} t))   [Ampere]"
+
+    V = L * ILp
+    I_R = V / Rr
+    Src = I0 * np.sin(w * t) if mode == "AC" else np.full_like(t, I0)
+    fV = f"V(t) = L·I_L′(t)   [Volt]"
+    return dict(V=V, Vp=None, Src=Src, src_kind="I", I_R=I_R, I_L=I_L,
+                I_C=None, I_total=Src, Q_C=None,
+                alpha=a1, alpha_settle=a1, damping="1st-order (τ = L/R)",
+                w0=0.0, env_y_hi=spread, env_y_lo=-spread,
+                fV=fV, fI=fI)
+
+
+def solve_parallel_rlc(R, L, Cuf, I0, w, t, mode="AC"):
+    """R∥L∥C driven by a current source (true parallel resonance):
+
+        C·V'' + V'/R + V/L = I'(t)
+    """
+    Cf = Cuf * 1e-6
+    Rr = max(R, 1e-9)
+    if mode == "AC":
+        gs = solve_second_general(Cf, 1.0 / Rr, 1.0 / L, t, mode="AC", w=w,
+                                  F0=I0 * w, phase=math.pi / 2, yname="V")
+    else:
+        gs = solve_second_general(Cf, 1.0 / Rr, 1.0 / L, t, mode="DC",
+                                  y0=0.0, yp0=I0 / Cf, yname="V")
+    V, Vp = gs["y"], gs["yp"]
+    Src = I0 * np.sin(w * t) if mode == "AC" else np.full_like(t, I0)
+    I_C = Cf * Vp
+    I_R = V / Rr
+    I_L = Src - I_R - I_C
+
+    Zp = phi_p = None
+    if mode == "AC":
+        Yp = complex(1.0 / Rr, w * Cf - 1.0 / (w * L))
+        Zpc = 1.0 / Yp
+        Zp, phi_p = abs(Zpc), math.degrees(math.atan2(Zpc.imag, Zpc.real))
+
+    fI = f"I_L(t) = I(t) − I_R(t) − I_C(t)   [Ampere]   (KCL)"
+    out = dict(V=V, Vp=Vp, Src=Src, src_kind="I", I_R=I_R, I_L=I_L, I_C=I_C,
+               I_total=Src, Q_C=Cf * V, alpha=gs["alpha"],
+               alpha_settle=gs["alpha_settle"], damping=gs["damping"],
+               w0=gs["w0"], env_y_hi=gs["env_y_hi"], env_y_lo=gs["env_y_lo"],
+               fV=gs["fy"], fI=fI, Zp=Zp, phi_p=phi_p)
+    if "wd" in gs:
+        out["wd"] = gs["wd"]
+    if "r1" in gs:
+        out["r1"] = gs["r1"]
+    if "r2" in gs:
+        out["r2"] = gs["r2"]
+    return out
+
+
+def solve_tank(R, L, Cuf, E0, w, t, mode="AC"):
+    """Tank: R in series with an L∥C tank, driven by a voltage source:
+
+        C·V_t'' + V_t'/R + V_t/L = E'(t)/R
+    """
+    Cf = Cuf * 1e-6
+    Rr = max(R, 1e-9)
+    if mode == "AC":
+        gs = solve_second_general(Cf, 1.0 / Rr, 1.0 / L, t, mode="AC", w=w,
+                                  F0=E0 * w / Rr, phase=math.pi / 2,
+                                  yname="V_t")
+    else:
+        gs = solve_second_general(Cf, 1.0 / Rr, 1.0 / L, t, mode="DC",
+                                  y0=0.0, yp0=E0 / (Rr * Cf), yname="V_t")
+    Vt, Vtp = gs["y"], gs["yp"]
+    Esrc = E0 * np.sin(w * t) if mode == "AC" else np.full_like(t, E0)
+    I_C = Cf * Vtp
+    I_total = (Esrc - Vt) / Rr                # current through R = into the tank
+    I_L = I_total - I_C
+
+    Ztot = phi_tot = None
+    if mode == "AC":
+        Ztank = 1.0 / complex(0.0, w * Cf - 1.0 / (w * L)) if \
+            abs(w * Cf - 1.0 / (w * L)) > 1e-30 else complex(1e18, 0.0)
+        Zt = complex(Rr, 0.0) + Ztank
+        Ztot, phi_tot = abs(Zt), math.degrees(math.atan2(Zt.imag, Zt.real))
+
+    fI = f"I(t) = (E(t) − V_t(t))/R   [Ampere]   (through R, into the tank)"
+    return dict(V=Vt, Vp=Vtp, Src=Esrc, src_kind="E", I_R=I_total, I_L=I_L,
+                I_C=I_C, I_total=I_total, Q_C=Cf * Vt, alpha=gs["alpha"],
+                alpha_settle=gs["alpha_settle"], damping=gs["damping"],
+                w0=gs["w0"], env_y_hi=gs["env_y_hi"], env_y_lo=gs["env_y_lo"],
+                fV=gs["fy"], fI=fI, Zp=Ztot, phi_p=phi_tot,
+                **({"wd": gs["wd"]} if "wd" in gs else {}),
+                **({"r1": gs["r1"], "r2": gs["r2"]} if "r2" in gs else
+                   ({"r1": gs["r1"]} if "r1" in gs else {})))
+
+
+def solve_parallel(preset, R, L, Cuf, E0, w, t, mode="AC"):
+    """Dispatch to the right parallel-preset solver."""
+    if preset == "RC_P":
+        return solve_parallel_rc(R, Cuf, E0, w, t, mode)
+    if preset == "RL_P":
+        return solve_parallel_rl(R, L, E0, w, t, mode)
+    if preset == "RLC_P":
+        return solve_parallel_rlc(R, L, Cuf, E0, w, t, mode)
+    if preset == "TANK":
+        return solve_tank(R, L, Cuf, E0, w, t, mode)
+    raise ValueError(f"unknown parallel preset: {preset!r}")
+
+
+def solve_parallel_rk4(preset, R, L, Cuf, E0, w, t, mode="AC"):
+    """RK4 numerical integration as an independent check of the parallel
+    analytics. Returns (V, I_total_or_secondary) matching the state
+    variable each preset actually solves for, for cross-checking against
+    the analytic `V`/`I_L` arrays."""
+    Cf = Cuf * 1e-6
+    Rr = max(R, 1e-9)
+    dt = t[1] - t[0]
+    n_sub = max(2, int(math.ceil(dt / 8e-6)))
+    h = dt / n_sub
+
+    def src(tt):
+        return E0 * math.sin(w * tt) if mode == "AC" else E0
+
+    if preset == "RC_P":
+        V = np.empty_like(t)
+        V[0] = 0.0
+        v = 0.0
+
+        def g(tt, v):
+            return (src(tt) - v / Rr) / Cf
+
+        for n in range(1, len(t)):
+            tt = t[n - 1]
+            for _ in range(n_sub):
+                k1 = g(tt, v)
+                k2 = g(tt + h / 2, v + h / 2 * k1)
+                k3 = g(tt + h / 2, v + h / 2 * k2)
+                k4 = g(tt + h, v + h * k3)
+                v += h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+                tt += h
+            V[n] = v
+        return V, None
+
+    if preset == "RL_P":
+        IL = np.empty_like(t)
+        IL[0] = 0.0
+        i_l = 0.0
+
+        def g(tt, i_l):
+            return (src(tt) - i_l) * Rr / L
+
+        for n in range(1, len(t)):
+            tt = t[n - 1]
+            for _ in range(n_sub):
+                k1 = g(tt, i_l)
+                k2 = g(tt + h / 2, i_l + h / 2 * k1)
+                k3 = g(tt + h / 2, i_l + h / 2 * k2)
+                k4 = g(tt + h, i_l + h * k3)
+                i_l += h / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+                tt += h
+            IL[n] = i_l
+        return IL, None
+
+    if preset == "RLC_P":
+        V = np.empty_like(t)
+        Vp = np.empty_like(t)
+        V[0] = 0.0
+        Vp[0] = E0 / Cf if mode == "DC" else 0.0
+        v, vp = V[0], Vp[0]
+
+        def dsrc(tt):
+            return E0 * w * math.cos(w * tt) if mode == "AC" else 0.0
+
+        def f(tt, v, vp):
+            return vp, (dsrc(tt) - vp / Rr - v / L) / Cf
+
+        for n in range(1, len(t)):
+            tt = t[n - 1]
+            for _ in range(n_sub):
+                k1v, k1p = f(tt, v, vp)
+                k2v, k2p = f(tt + h / 2, v + h / 2 * k1v, vp + h / 2 * k1p)
+                k3v, k3p = f(tt + h / 2, v + h / 2 * k2v, vp + h / 2 * k2p)
+                k4v, k4p = f(tt + h, v + h * k3v, vp + h * k3p)
+                v += h / 6 * (k1v + 2 * k2v + 2 * k3v + k4v)
+                vp += h / 6 * (k1p + 2 * k2p + 2 * k3p + k4p)
+                tt += h
+            V[n], Vp[n] = v, vp
+        return V, Vp
+
+    if preset == "TANK":
+        Vt = np.empty_like(t)
+        Vtp = np.empty_like(t)
+        Vt[0] = 0.0
+        Vtp[0] = E0 / (Rr * Cf) if mode == "DC" else 0.0
+        v, vp = Vt[0], Vtp[0]
+
+        def dsrc(tt):
+            return (E0 * w * math.cos(w * tt) if mode == "AC" else 0.0) / Rr
+
+        def f(tt, v, vp):
+            return vp, (dsrc(tt) - vp / Rr - v / L) / Cf
+
+        for n in range(1, len(t)):
+            tt = t[n - 1]
+            for _ in range(n_sub):
+                k1v, k1p = f(tt, v, vp)
+                k2v, k2p = f(tt + h / 2, v + h / 2 * k1v, vp + h / 2 * k1p)
+                k3v, k3p = f(tt + h / 2, v + h / 2 * k2v, vp + h / 2 * k2p)
+                k4v, k4p = f(tt + h, v + h * k3v, vp + h * k3p)
+                v += h / 6 * (k1v + 2 * k2v + 2 * k3v + k4v)
+                vp += h / 6 * (k1p + 2 * k2p + 2 * k3p + k4p)
+                tt += h
+            Vt[n], Vtp[n] = v, vp
+        return Vt, Vtp
+
+    raise ValueError(f"unknown parallel preset: {preset!r}")

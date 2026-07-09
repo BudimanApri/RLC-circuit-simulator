@@ -13,9 +13,12 @@ from matplotlib.transforms import blended_transform_factory
 from matplotlib.widgets import Slider, Button, CheckButtons, TextBox
 
 from rlc_config import (DEF, BOUNDS, SLIDERS, TH, BADGE, TOPOS, TOPO_ORDER,
-                        SOURCE_ORDER, C_SRC, C_R, C_L, C_C)
-from rlc_schematic import Schematic
-from rlc_solver import solve, solve_rk4
+                        SOURCE_ORDER, FAMILY_ORDER, PARALLEL_ORDER,
+                        PARALLEL_TOPOS, PARALLEL_I0_DEFAULT,
+                        PARALLEL_I0_BOUNDS, PARALLEL_I0_SLIDER,
+                        C_SRC, C_R, C_L, C_C)
+from rlc_schematic import Schematic, ParallelSchematic
+from rlc_solver import solve, solve_rk4, solve_parallel
 
 
 class RLCApp:
@@ -23,11 +26,17 @@ class RLCApp:
         self.playing = False
         self.vals = dict(DEF)
         self.source_mode = "AC"
+        self.family = "Series"
+        self.parallel_preset = "RC_P"
+        self._amp_is_voltage = True
+        self._amplitude_bounds = BOUNDS["E0"]
         self.rk4_data = None
         self._spans = []
         self._last_hover = 0.0
         self.hover_on = False
         self.v_leg = None
+        self.p_leg = None
+        self.pv_leg = None
 
         self.fig = plt.figure(figsize=(13.8, 8.5))
         self.fig.patch.set_facecolor(TH["bg"])
@@ -56,6 +65,19 @@ class RLCApp:
                 sp.set_visible(False)
             b.on_clicked(lambda ev, nm=name: self._set_source(nm))
             self.source_btns[name] = b
+
+        # ---- circuit family toggle: series vs. parallel -------------------------
+        self.fig.text(0.225, 0.9175, "Family:", fontsize=7.8, weight="bold",
+                      color=TH["sub"], va="center")
+        self.family_btns = {}
+        for j, name in enumerate(FAMILY_ORDER):
+            axb = self.fig.add_axes([0.283 + j * 0.066, 0.906, 0.061, 0.023])
+            b = Button(axb, name, color="#e2e8f0", hovercolor="#cbd5e1")
+            b.label.set_fontsize(7.5)
+            for sp in axb.spines.values():
+                sp.set_visible(False)
+            b.on_clicked(lambda ev, nm=name: self._set_family(nm))
+            self.family_btns[name] = b
 
         # ---- chart axes: charge, current, voltages -----------------------------
         self.ax_q = self.fig.add_axes([0.055, 0.725, 0.585, 0.175])
@@ -102,7 +124,7 @@ class RLCApp:
         self.ln_vl, = self.ax_v.plot([], [], color=C_L, lw=1.3, zorder=3)
         self.ln_vc, = self.ax_v.plot([], [], color=C_C, lw=1.3, zorder=3)
 
-        self.fig.legend(
+        self.fig_legend = self.fig.legend(
             [self.ln_q, self.ln_i, self.ln_qss, self.ln_qrk, self.ln_qenv_p],
             ["Q(t) analytic", "I(t) analytic", "steady-state",
              "RK4 (numeric)", "transient envelope"],
@@ -110,13 +132,50 @@ class RLCApp:
             fontsize=8, frameon=False, handlelength=1.7,
             columnspacing=1.1, handletextpad=0.5, labelcolor=TH["text"])
 
-        # initial-condition markers Q(0)=0, I(0)=0
-        self.ax_q.plot(0, 0, "o", color=TH["q"], ms=6, zorder=5)
-        self.ax_i.plot(0, 0, "o", color=TH["i"], ms=6, zorder=5)
-        self.ax_q.annotate("Q(0) = 0", (0, 0), textcoords="offset points",
-                           xytext=(8, -14), fontsize=8, color=TH["q"])
-        self.ax_i.annotate("I(0) = 0", (0, 0), textcoords="offset points",
-                           xytext=(8, -14), fontsize=8, color=TH["i"])
+        # initial-condition markers Q(0)=0, I(0)=0 (series-mode only)
+        self.dot_q0, = self.ax_q.plot(0, 0, "o", color=TH["q"], ms=6,
+                                      zorder=5)
+        self.dot_i0, = self.ax_i.plot(0, 0, "o", color=TH["i"], ms=6,
+                                      zorder=5)
+        self.ann_q0 = self.ax_q.annotate("Q(0) = 0", (0, 0),
+                                         textcoords="offset points",
+                                         xytext=(8, -14), fontsize=8,
+                                         color=TH["q"])
+        self.ann_i0 = self.ax_i.annotate("I(0) = 0", (0, 0),
+                                         textcoords="offset points",
+                                         xytext=(8, -14), fontsize=8,
+                                         color=TH["i"])
+
+        # ---- parallel-mode chart artists (Milestone 2) -------------------------
+        # Share the same 3 axes as series mode but repurposed: ax_q -> voltage,
+        # ax_i -> multi-trace branch currents, ax_v -> charge on C. All hidden
+        # by default; toggled on when family == "Parallel".
+        self.ln_pv, = self.ax_q.plot([], [], color=TH["q"], lw=1.7, zorder=3,
+                                     visible=False)
+        self.ln_pe, = self.ax_q.plot([], [], "--", color=C_SRC, lw=1.2,
+                                     zorder=2.5, visible=False)
+        self.ln_pir, = self.ax_i.plot([], [], color=C_R, lw=1.5, zorder=3,
+                                      visible=False)
+        self.ln_pil, = self.ax_i.plot([], [], color=C_L, lw=1.5, zorder=3,
+                                      visible=False)
+        self.ln_pic, = self.ax_i.plot([], [], color=C_C, lw=1.5, zorder=3,
+                                      visible=False)
+        self.ln_pitot, = self.ax_i.plot([], [], "--", color=TH["text"],
+                                        lw=1.1, alpha=0.8, zorder=2.5,
+                                        visible=False)
+        self.ln_pqc, = self.ax_v.plot([], [], color=C_C, lw=1.7, zorder=3,
+                                      visible=False)
+        self.txt_no_c = self.ax_v.text(
+            0.5, 0.5, "No capacitor in this circuit — nothing to plot here.",
+            transform=self.ax_v.transAxes, ha="center", va="center",
+            fontsize=9, color=TH["sub"], visible=False)
+        self.txt_p = self.ax_q.text(0.987, 0.94, "", fontsize=8,
+                                    transform=self.ax_q.transAxes,
+                                    linespacing=1.3, ha="right", va="top",
+                                    color="white", zorder=7, visible=False,
+                                    bbox=dict(boxstyle="round,pad=0.45",
+                                              fc="#0f172a", ec="none",
+                                              alpha=0.82))
 
         # transient / steady-state markers (5τ)
         tr_q = blended_transform_factory(self.ax_q.transData,
@@ -166,19 +225,26 @@ class RLCApp:
                                      transform=self.ax_v.transAxes, **tip)
 
         # ---- card: circuit schematic + topology buttons -------------------------
+        # The 5 button slots are index-addressable and relabeled/rebound on
+        # every family switch: Series uses all 5 (TOPO_ORDER), Parallel uses
+        # the first 4 (PARALLEL_ORDER) and hides the 5th slot.
         self._card([0.665, 0.700, 0.325, 0.235], "CIRCUIT")
         self.topo = "RLC"
-        self.topo_btns = {}
-        for j, name in enumerate(TOPO_ORDER):
+        self.topo_btns = []
+        for j in range(5):
             axb = self.fig.add_axes([0.775 + j * 0.0425, 0.906, 0.040, 0.023])
-            b = Button(axb, name, color="#e2e8f0", hovercolor="#cbd5e1")
+            b = Button(axb, "", color="#e2e8f0", hovercolor="#cbd5e1")
             b.label.set_fontsize(7.5)
             for sp in axb.spines.values():
                 sp.set_visible(False)
-            b.on_clicked(lambda ev, nm=name: self._set_topo(nm))
-            self.topo_btns[name] = b
+            b.on_clicked(lambda ev, idx=j: self._topo_button_clicked(idx))
+            self.topo_btns.append(b)
         self.ax_sch = self.fig.add_axes([0.673, 0.700, 0.309, 0.196])
         self.sch = Schematic(self.ax_sch)
+        self.ax_psch = self.fig.add_axes([0.673, 0.700, 0.309, 0.196])
+        self.ax_psch.set_visible(False)
+        self.p_sch = ParallelSchematic(self.ax_psch)
+        self.p_sch.set_preset(self.parallel_preset)
 
         # ---- card: analysis -------------------------------------------------------
         self._card([0.665, 0.487, 0.325, 0.198], "ANALYSIS")
@@ -348,6 +414,7 @@ class RLCApp:
         self.timer.add_callback(self._tick)
 
         self._set_source("AC")
+        self._set_family("Series")
         self._set_topo("RLC")
 
     # ------------------------------------------------------------------ card
@@ -381,6 +448,9 @@ class RLCApp:
             self.recompute()
         return cb
 
+    def _bounds_for(self, key):
+        return self._amplitude_bounds if key == "E0" else BOUNDS[key]
+
     def _box_submitted(self, key):
         def cb(text):
             try:
@@ -388,7 +458,7 @@ class RLCApp:
             except ValueError:
                 self._sync_box(key)          # invalid input → restore display
                 return
-            lo, hi = BOUNDS[key]
+            lo, hi = self._bounds_for(key)
             v = min(max(v, lo), hi)
             if v == self.vals[key]:
                 self._sync_box(key)
@@ -420,18 +490,44 @@ class RLCApp:
         tb.text_disp.set_alpha(a_txt)
         tb.ax.set_facecolor("#f8fafc" if on else "#edf1f7")
 
+    def _style_button(self, b, active):
+        b.color = TH["accent"] if active else "#e2e8f0"
+        b.hovercolor = "#1e40af" if active else "#cbd5e1"
+        b.ax.set_facecolor(b.color)
+        b.label.set_color("white" if active else TH["text"])
+        b.label.set_fontweight("bold" if active else "normal")
+
+    def _refresh_topo_buttons(self):
+        """Relabel/restyle the 5 shared button slots for the active family
+        (Series uses all 5; Parallel uses 4 and hides the 5th slot)."""
+        if self.family == "Series":
+            order, active_name = TOPO_ORDER, self.topo
+        else:
+            order, active_name = PARALLEL_ORDER, self.parallel_preset
+        for j, b in enumerate(self.topo_btns):
+            if j < len(order):
+                name = order[j]
+                label = name if self.family == "Series" \
+                    else PARALLEL_TOPOS[name]["label"]
+                b.label.set_text(label)
+                b.ax.set_visible(True)
+                self._style_button(b, name == active_name)
+            else:
+                b.ax.set_visible(False)
+
+    def _topo_button_clicked(self, idx):
+        if self.family == "Series":
+            if idx < len(TOPO_ORDER):
+                self._set_topo(TOPO_ORDER[idx])
+        elif idx < len(PARALLEL_ORDER):
+            self._set_parallel_preset(PARALLEL_ORDER[idx])
+
     def _set_topo(self, name):
         self.topo = name
         cfg = TOPOS[name]
         for key, on in (("R", cfg["R"]), ("L", cfg["L"]), ("C", cfg["C"])):
             self._enable_param(key, on)
-        for nm, b in self.topo_btns.items():
-            active = (nm == name)
-            b.color = TH["accent"] if active else "#e2e8f0"
-            b.hovercolor = "#1e40af" if active else "#cbd5e1"
-            b.ax.set_facecolor(b.color)
-            b.label.set_color("white" if active else TH["text"])
-            b.label.set_fontweight("bold" if active else "normal")
+        self._refresh_topo_buttons()
         self.sch.set_topology(cfg["R"], cfg["L"], cfg["C"])
         self._update_equation_text()
         self.ax_q.set_ylabel(
@@ -440,22 +536,113 @@ class RLCApp:
         self._stop_anim()
         self.recompute()
 
+    def _set_parallel_preset(self, name):
+        self.parallel_preset = name
+        self._refresh_topo_buttons()
+        self.p_sch.set_preset(name)
+        self._update_equation_text()
+        self._configure_amplitude_slider()
+        self._stop_anim()
+        self.recompute()
+
+    def _set_family(self, name):
+        self.family = name
+        for m, b in self.family_btns.items():
+            self._style_button(b, m == name)
+
+        is_series = (name == "Series")
+        self.ax_sch.set_visible(is_series)
+        self.ax_psch.set_visible(not is_series)
+        self._set_series_artists_visible(is_series)
+        self._set_parallel_artists_visible(not is_series)
+        self._refresh_topo_buttons()
+        self._update_equation_text()
+        self._configure_amplitude_slider()
+
+        if is_series:
+            cfg = TOPOS[self.topo]
+            self.ax_q.set_ylabel(
+                "Charge  Q  (mC)" if cfg["C"] else "Charge delivered  Q  (mC)",
+                fontsize=9, color=TH["text"])
+            self.ax_i.set_ylabel("Current  I  (A)", fontsize=9,
+                                 color=TH["text"])
+            self.ax_v.set_ylabel("Voltage  (V)", fontsize=9,
+                                 color=TH["text"])
+        else:
+            self.ax_q.set_ylabel("Voltage  V  (V)", fontsize=9,
+                                 color=TH["text"])
+            self.ax_i.set_ylabel("Branch currents  (A)", fontsize=9,
+                                 color=TH["text"])
+            self.ax_v.set_ylabel("Charge on C   Q_C  (mC)", fontsize=9,
+                                 color=TH["text"])
+
+        self._stop_anim()
+        self.recompute()
+
+    def _set_series_artists_visible(self, flag):
+        for art in (self.ln_q, self.ln_i, self.ln_e, self.ln_vr, self.ln_vl,
+                    self.ln_vc, self.ln_qss, self.ln_iss, self.ln_qrk,
+                    self.ln_irk, self.ln_qenv_p, self.ln_qenv_m,
+                    self.ln_ienv_p, self.ln_ienv_m, self.dot_q0,
+                    self.dot_i0, self.ann_q0, self.ann_i0):
+            art.set_visible(flag)
+        self.fig_legend.set_visible(flag)
+        if not flag and self.v_leg is not None:
+            self.v_leg.set_visible(False)
+
+    def _set_parallel_artists_visible(self, flag):
+        for art in (self.ln_pv, self.ln_pir, self.ln_pil, self.ln_pic,
+                    self.ln_pitot):
+            art.set_visible(flag)
+        if not flag:
+            for art in (self.ln_pe, self.ln_pqc, self.txt_no_c, self.txt_p):
+                art.set_visible(False)
+            if self.p_leg is not None:
+                self.p_leg.set_visible(False)
+            if self.pv_leg is not None:
+                self.pv_leg.set_visible(False)
+
+    def _configure_amplitude_slider(self):
+        """The amplitude slider is volts for Series and for the (voltage-
+        driven) Tank preset, and amps for the current-driven parallel
+        presets. Reconfigure its range/label, and reset its value only when
+        the underlying *unit* actually changes (not on every preset click
+        within the same unit)."""
+        want_voltage = (self.family == "Series"
+                        or self.parallel_preset == "TANK")
+        s, tb = self.sliders["E0"], self.boxes["E0"]
+        if want_voltage == self._amp_is_voltage:
+            return
+        self._amp_is_voltage = want_voltage
+        if want_voltage:
+            lo, hi, step = 0.0, 300.0, 5.0
+            label, default = "E₀  (V)", DEF["E0"]
+            self._amplitude_bounds = BOUNDS["E0"]
+        else:
+            lo, hi, step = PARALLEL_I0_SLIDER
+            label, default = "I₀  (A)", PARALLEL_I0_DEFAULT
+            self._amplitude_bounds = PARALLEL_I0_BOUNDS
+        s.valmin, s.valmax, s.valstep = lo, hi, step
+        s.ax.set_xlim(lo, hi)
+        s.label.set_text(label)
+        self.vals["E0"] = default
+        s.eventson = False
+        s.set_val(default)
+        s.eventson = True
+        self._sync_box("E0")
+
     def _set_source(self, mode):
         self.source_mode = mode
         for m, b in self.source_btns.items():
-            active = (m == mode)
-            b.color = TH["accent"] if active else "#e2e8f0"
-            b.hovercolor = "#1e40af" if active else "#cbd5e1"
-            b.ax.set_facecolor(b.color)
-            b.label.set_color("white" if active else TH["text"])
-            b.label.set_fontweight("bold" if active else "normal")
+            self._style_button(b, m == mode)
         self._enable_param("W", mode == "AC")
         self._update_equation_text()
         self._stop_anim()
         self.recompute()
 
     def _update_equation_text(self):
-        cfg = TOPOS[self.topo]
+        cfg = TOPOS[self.topo] if self.family == "Series" \
+            else PARALLEL_TOPOS[self.parallel_preset]
         self.txt_eq.set_text(cfg["eq"] if self.source_mode == "AC"
                              else cfg["eq_dc"])
 
@@ -491,15 +678,23 @@ class RLCApp:
     def reset(self):
         self._stop_anim()
         self.vals = dict(DEF)
+        if not self._amp_is_voltage:
+            self.vals["E0"] = PARALLEL_I0_DEFAULT
         for key, s in self.sliders.items():
             s.eventson = False
-            s.set_val(DEF[key])
+            s.set_val(self.vals[key])
             s.eventson = True
             self._sync_box(key)
         self.recompute()
 
     # ------------------------------------------------------------- computation
     def recompute(self):
+        if self.family == "Series":
+            self._recompute_series()
+        else:
+            self._recompute_parallel()
+
+    def _recompute_series(self):
         R, L, Cuf, E0, w = self.params()
         Tms = self.vals["T"]
         mode = self.source_mode
@@ -573,64 +768,8 @@ class RLCApp:
                     f"max|ΔI| = {di:.2e} A   →   numeric ≡ analytic ✓")
         self.txt_note.set_text(note)
 
-        # ---- transient → steady-state marker (5τ) ------------------------------
-        for p in self._spans:
-            p.remove()
-        self._spans = []
         tmax = self.tms[-1]
-        a_s = sol["alpha_settle"]
-        if a_s == math.inf:
-            t5 = 0.0                      # no transient at all
-        elif a_s > 0:
-            t5 = 5.0 / a_s * 1e3
-        else:
-            t5 = math.inf                 # transient never decays
-
-        self.lab_steady.set_text("STEADY-STATE")
-        if t5 == 0.0:
-            for ln in (self.vln_q, self.vln_i, self.vln_v):
-                ln.set_visible(False)
-            self.lab_trans.set_visible(False)
-            self.lab_steady.set_visible(True)
-            self.lab_steady.set_position((tmax / 2.0, 0.95))
-            self.lab_steady.set_text("STEADY-STATE   (no transient)")
-            self.lab_5t.set_visible(False)
-        elif math.isfinite(t5):
-            end = min(t5, tmax)
-            for ax in (self.ax_q, self.ax_i, self.ax_v):
-                self._spans.append(ax.axvspan(0.0, end, fc=TH["env"],
-                                              alpha=0.07, lw=0, zorder=0.6))
-            inside = t5 < 0.985 * tmax
-            for ln in (self.vln_q, self.vln_i, self.vln_v):
-                ln.set_visible(inside)
-                if inside:
-                    ln.set_xdata([t5, t5])
-            if inside:
-                self.lab_trans.set_visible(t5 > 0.10 * tmax)
-                self.lab_trans.set_position((t5 / 2.0, 0.95))
-                self.lab_trans.set_text("TRANSIENT")
-                self.lab_steady.set_visible((tmax - t5) > 0.14 * tmax)
-                self.lab_steady.set_position(((t5 + tmax) / 2.0, 0.95))
-                ha = "left" if t5 <= 0.70 * tmax else "right"
-                dx = 0.012 * tmax if ha == "left" else -0.012 * tmax
-                self.lab_5t.set_visible(True)
-                self.lab_5t.set_ha(ha)
-                self.lab_5t.set_position((t5 + dx, 0.08))
-                self.lab_5t.set_text(
-                    f"transient practically over:  5τ ≈ {t5:.3g} ms")
-            else:
-                self.lab_trans.set_visible(True)
-                self.lab_trans.set_position((tmax / 2.0, 0.95))
-                self.lab_trans.set_text(
-                    f"TRANSIENT   (5τ ≈ {t5:.3g} ms  >  time window)")
-                self.lab_steady.set_visible(False)
-                self.lab_5t.set_visible(False)
-        else:
-            for ln in (self.vln_q, self.vln_i, self.vln_v):
-                ln.set_visible(False)
-            self.lab_trans.set_visible(False)
-            self.lab_steady.set_visible(False)
-            self.lab_5t.set_visible(False)
+        self._update_transient_marker(sol["alpha_settle"], tmax)
 
         # ---- axis limits (fixed during animation; asymmetric when offset) -------
         def limits(data, lo_arr, hi_arr):
@@ -683,6 +822,9 @@ class RLCApp:
         for t_ in (self.txt_z, self.txt_phi, self.txt_lag, self.txt_ratio):
             t_.set_visible(show_ac_panel)
         self.txt_dc_note.set_visible(not show_ac_panel)
+        self.txt_dc_note.set_text(
+            "Impedance and resonance are AC-only\nconcepts. Switch the "
+            "source to AC\nto see them here.")
         show_gauge = show_ac_panel and cfg["L"] and cfg["C"]
         self.ax_res.set_visible(show_gauge)
 
@@ -736,6 +878,244 @@ class RLCApp:
 
         self.txt_fq.set_text(sol["fq"])
         self.txt_fi.set_text(sol["fi"])
+
+        self.idx = self.npts
+        self._draw_upto(self.npts, final=True)
+
+    def _update_transient_marker(self, alpha_settle, tmax):
+        """Shade the transient region and place the 5τ marker on ax_q/ax_i/
+        ax_v. Generic on alpha_settle alone, so both the series and the
+        parallel recompute() paths share this."""
+        for p in self._spans:
+            p.remove()
+        self._spans = []
+        a_s = alpha_settle
+        if a_s == math.inf:
+            t5 = 0.0                      # no transient at all
+        elif a_s > 0:
+            t5 = 5.0 / a_s * 1e3
+        else:
+            t5 = math.inf                 # transient never decays
+
+        self.lab_steady.set_text("STEADY-STATE")
+        if t5 == 0.0:
+            for ln in (self.vln_q, self.vln_i, self.vln_v):
+                ln.set_visible(False)
+            self.lab_trans.set_visible(False)
+            self.lab_steady.set_visible(True)
+            self.lab_steady.set_position((tmax / 2.0, 0.95))
+            self.lab_steady.set_text("STEADY-STATE   (no transient)")
+            self.lab_5t.set_visible(False)
+        elif math.isfinite(t5):
+            end = min(t5, tmax)
+            for ax in (self.ax_q, self.ax_i, self.ax_v):
+                self._spans.append(ax.axvspan(0.0, end, fc=TH["env"],
+                                              alpha=0.07, lw=0, zorder=0.6))
+            inside = t5 < 0.985 * tmax
+            for ln in (self.vln_q, self.vln_i, self.vln_v):
+                ln.set_visible(inside)
+                if inside:
+                    ln.set_xdata([t5, t5])
+            if inside:
+                self.lab_trans.set_visible(t5 > 0.10 * tmax)
+                self.lab_trans.set_position((t5 / 2.0, 0.95))
+                self.lab_trans.set_text("TRANSIENT")
+                self.lab_steady.set_visible((tmax - t5) > 0.14 * tmax)
+                self.lab_steady.set_position(((t5 + tmax) / 2.0, 0.95))
+                ha = "left" if t5 <= 0.70 * tmax else "right"
+                dx = 0.012 * tmax if ha == "left" else -0.012 * tmax
+                self.lab_5t.set_visible(True)
+                self.lab_5t.set_ha(ha)
+                self.lab_5t.set_position((t5 + dx, 0.08))
+                self.lab_5t.set_text(
+                    f"transient practically over:  5τ ≈ {t5:.3g} ms")
+            else:
+                self.lab_trans.set_visible(True)
+                self.lab_trans.set_position((tmax / 2.0, 0.95))
+                self.lab_trans.set_text(
+                    f"TRANSIENT   (5τ ≈ {t5:.3g} ms  >  time window)")
+                self.lab_steady.set_visible(False)
+                self.lab_5t.set_visible(False)
+        else:
+            for ln in (self.vln_q, self.vln_i, self.vln_v):
+                ln.set_visible(False)
+            self.lab_trans.set_visible(False)
+            self.lab_steady.set_visible(False)
+            self.lab_5t.set_visible(False)
+
+    # --------------------------------------------------------- parallel compute
+    def _recompute_parallel(self):
+        R, L, Cuf, E0, w = self.params()
+        Tms = self.vals["T"]
+        mode = self.source_mode
+        preset = self.parallel_preset
+        pcfg = PARALLEL_TOPOS[preset]
+        Cf = Cuf * 1e-6
+        Rr = max(R, 1e-9)
+
+        w_eff = w if mode == "AC" else 0.0
+        wfast = w_eff
+        if pcfg["C"] and pcfg["L"]:
+            wfast = max(wfast, math.sqrt(1.0 / (L * Cf)))
+        elif pcfg["C"]:
+            wfast = max(wfast, 1.0 / (Rr * Cf))
+        elif pcfg["L"]:
+            wfast = max(wfast, Rr / L)
+        self.npts = int(np.clip(Tms * 1e-3 * max(wfast, 1.0) / (2 * math.pi)
+                                * 36.0, 3000, 48000))
+        self.step = max(1, self.npts // 420)
+        self.t = np.linspace(0.0, Tms * 1e-3, self.npts)
+        self.tms = self.t * 1e3
+
+        sol = solve_parallel(preset, R, L, Cuf, E0, w, self.t, mode=mode)
+        self.psol = sol
+
+        # -- chart 1 (ax_q): voltage ---------------------------------------------
+        self.ln_pv.set_data(self.tms, sol["V"])
+        show_e = (sol["src_kind"] == "E")
+        self.ln_pe.set_visible(show_e)
+        if show_e:
+            self.ln_pe.set_data(self.tms, sol["Src"])
+        if self.pv_leg is not None:
+            self.pv_leg.remove()
+            self.pv_leg = None
+        if show_e:
+            self.pv_leg = self.ax_q.legend(
+                [self.ln_pv, self.ln_pe], ["V_tank(t)", "E(t) source"],
+                loc="lower right", bbox_to_anchor=(1.0, 1.0), ncol=2,
+                fontsize=6.8, frameon=False, handlelength=1.4,
+                columnspacing=1.0, handletextpad=0.4, borderaxespad=0.0,
+                labelcolor=TH["sub"])
+
+        # -- chart 2 (ax_i): branch currents -------------------------------------
+        for ln, arr in ((self.ln_pir, sol["I_R"]), (self.ln_pil, sol["I_L"]),
+                        (self.ln_pic, sol["I_C"])):
+            present = arr is not None
+            ln.set_visible(present)
+            if present:
+                ln.set_data(self.tms, arr)
+        self.ln_pitot.set_data(self.tms, sol["I_total"])
+        if self.p_leg is not None:
+            self.p_leg.remove()
+        handles, labels = [], []
+        if sol["I_R"] is not None:
+            handles.append(self.ln_pir)
+            labels.append("I_R")
+        if sol["I_L"] is not None:
+            handles.append(self.ln_pil)
+            labels.append("I_L")
+        if sol["I_C"] is not None:
+            handles.append(self.ln_pic)
+            labels.append("I_C")
+        handles.append(self.ln_pitot)
+        labels.append("I_total" if pcfg["src"] == "I" else "I (through R)")
+        self.p_leg = self.ax_i.legend(
+            handles, labels, loc="lower right", bbox_to_anchor=(1.0, 1.0),
+            ncol=4, fontsize=6.4, frameon=False, handlelength=1.2,
+            columnspacing=0.9, handletextpad=0.4, borderaxespad=0.0,
+            labelcolor=TH["sub"])
+
+        # -- chart 3 (ax_v): charge on C ------------------------------------------
+        has_c = sol["Q_C"] is not None
+        self.ln_pqc.set_visible(has_c)
+        self.txt_no_c.set_visible(not has_c)
+        if has_c:
+            self.ln_pqc.set_data(self.tms, sol["Q_C"] * 1e3)
+
+        self.txt_note.set_text(
+            "Parallel mode: steady-state overlay, RK4 verification, and "
+            "the transient envelope are not available yet for parallel "
+            "circuits (planned for a future update).")
+
+        tmax = self.tms[-1]
+        self._update_transient_marker(sol["alpha_settle"], tmax)
+
+        # -- axis limits ------------------------------------------------------------
+        def limits(data):
+            lo, hi = float(np.min(data)), float(np.max(data))
+            span = max(hi - lo, 1e-12)
+            return lo - 0.18 * span, hi + 0.18 * span
+
+        vlo, vhi = limits(np.concatenate([sol["V"], sol["Src"]])
+                          if show_e else sol["V"])
+        self.ax_q.set_xlim(0, tmax)
+        self.ax_q.set_ylim(vlo, vhi)
+
+        i_arrays = [sol["I_total"]]
+        for arr in (sol["I_R"], sol["I_L"], sol["I_C"]):
+            if arr is not None:
+                i_arrays.append(arr)
+        ilo, ihi = limits(np.concatenate(i_arrays))
+        self.ax_i.set_ylim(ilo, ihi)
+
+        if has_c:
+            qlo, qhi = limits(sol["Q_C"] * 1e3)
+            self.ax_v.set_ylim(qlo, qhi)
+
+        # -- schematic labels ---------------------------------------------------------
+        self.p_sch.labels["R"].set_text(f"R = {R:.4g} Ω")
+        if pcfg["L"]:
+            self.p_sch.labels["L"].set_text(f"L = {L:.4g} H")
+        if pcfg["C"]:
+            self.p_sch.labels["C"].set_text(f"C = {Cuf:.4g} µF")
+        unit, sym = ("V", "E") if pcfg["src"] == "E" else ("A", "I")
+        if mode == "AC":
+            self.p_sch.labels["E"].set_text(
+                f"{sym}(t) = {E0:.4g}·sin({w:.4g}·t)  {unit}")
+        else:
+            self.p_sch.labels["E"].set_text(
+                f"{sym}(t) = {E0:.4g} {unit}  (DC step)")
+
+        # -- analysis panel -----------------------------------------------------------
+        for key, (fg, bg) in BADGE.items():
+            if key in sol["damping"]:
+                self.txt_badge.set_color(fg)
+                self.txt_badge.get_bbox_patch().set_facecolor(bg)
+                break
+        self.txt_badge.set_text(sol["damping"])
+        self.txt_info.set_text(
+            self._analysis_text_parallel(sol, R, L, Cuf, E0, mode))
+
+        # -- impedance & resonance panel ------------------------------------------------
+        # The R-X-Z triangle is a series-circuit visual; skip it here and show
+        # Zp/phi_p numerically (only meaningful for R∥L∥C and Tank in AC mode).
+        show_ac_panel = (mode == "AC" and sol.get("Zp") is not None)
+        self.ax_ph.set_visible(False)
+        for t_ in (self.txt_z, self.txt_phi, self.txt_lag, self.txt_ratio):
+            t_.set_visible(show_ac_panel)
+        self.ax_res.set_visible(show_ac_panel)
+        self.txt_dc_note.set_visible(not show_ac_panel)
+        if show_ac_panel:
+            self.txt_z.set_text(f"|Zp| = {sol['Zp']:.6g} Ω")
+            self.txt_phi.set_text(f"φ = {sol['phi_p']:+.3g}°")
+            if sol["phi_p"] > 0.5:
+                tag = "inductive-leaning  —  V lags the source current"
+            elif sol["phi_p"] < -0.5:
+                tag = "capacitive-leaning  —  V leads the source current"
+            else:
+                tag = "≈ resistive  (very near resonance)"
+            self.txt_lag.set_text(tag)
+            ratio = w / sol["w0"] if sol["w0"] else 1.0
+            near = abs(ratio - 1.0) < 0.05
+            self.res_dot.set_data(
+                [float(np.clip(math.log2(ratio), -2.05, 2.05))], [0.86])
+            self.res_dot.set_markerfacecolor("#16a34a" if near else "#475569")
+            self.txt_ratio.set_text(
+                f"ω/ω₀ = {ratio:.3f}"
+                + ("    —  near resonance!" if near else ""))
+            self.txt_ratio.set_color("#15803d" if near else TH["sub"])
+        elif mode == "AC":
+            self.txt_dc_note.set_text(
+                f"{pcfg['label']} has no resonance — only R∥L∥C\nand Tank "
+                "do. Pick one of those presets to\nsee impedance & "
+                "antiresonance here.")
+        else:
+            self.txt_dc_note.set_text(
+                "Impedance and resonance are AC-only\nconcepts. Switch "
+                "the source to AC\nto see them here.")
+
+        self.txt_fq.set_text(sol["fV"])
+        self.txt_fi.set_text(sol["fI"])
 
         self.idx = self.npts
         self._draw_upto(self.npts, final=True)
@@ -892,8 +1272,67 @@ class RLCApp:
                 f"Q(t) = (E₀/R)·t: charge delivered grows without bound\n"
                 f"{settle}")
 
+    def _analysis_text_parallel(self, sol, R, L, Cuf, E0, mode):
+        preset = self.parallel_preset
+        pcfg = PARALLEL_TOPOS[preset]
+        Cf = Cuf * 1e-6
+        Rr = max(R, 1e-9)
+        a_s = sol["alpha_settle"]
+        if a_s == math.inf:
+            settle = "no transient: instantly at its final value"
+        elif a_s == 0:
+            settle = "never settles (undamped oscillation or unbounded ramp)"
+        else:
+            settle = f"transient < 1% after 5τ ≈ {5.0 / a_s * 1e3:.3g} ms"
+        src_line = ("Source: current-driven" if pcfg["src"] == "I"
+                    else "Source: voltage-driven")
+
+        if preset == "RC_P":
+            tau = Rr * Cf
+            return (f"{src_line}      τ = RC = {tau * 1e3:.3g} ms      "
+                    f"α = 1/(RC) = {sol['alpha']:.4g} s⁻¹\n"
+                    f"KCL:  I(t) = I_R(t) + I_C(t)      "
+                    f"(I_R = V/R,   I_C = C·V′)\n"
+                    f"{settle}")
+        if preset == "RL_P":
+            tau = L / Rr
+            return (f"{src_line}      τ = L/R = {tau * 1e3:.3g} ms      "
+                    f"α = R/L = {sol['alpha']:.4g} s⁻¹\n"
+                    f"KCL:  I(t) = I_R(t) + I_L(t)      "
+                    f"(V = L·I_L′,   I_R = V/R)\n"
+                    f"{settle}")
+
+        if "wd" in sol:
+            mid = f"ω_d (oscillation) = {sol['wd']:.4g} rad/s"
+        elif "r2" in sol:
+            mid = (f"real roots:  r₁ = {sol['r1']:.4g},   "
+                   f"r₂ = {sol['r2']:.4g}  s⁻¹")
+        else:
+            mid = f"double root:  r = {sol['r1']:.4g}  s⁻¹"
+
+        if preset == "RLC_P":
+            return (f"{src_line}   (true parallel resonance)\n"
+                    f"α = 1/(2RC) = {sol['alpha']:.4g} s⁻¹\n"
+                    f"{mid}\n"
+                    f"ω₀ = 1/√(LC) = {sol['w0']:.4g} rad/s\n"
+                    f"KCL:  I(t) = I_R(t) + I_L(t) + I_C(t)\n"
+                    f"{settle}")
+        return (f"{src_line}   (R limits current into the L∥C tank)\n"
+                f"α = 1/(2RC) = {sol['alpha']:.4g} s⁻¹\n"
+                f"{mid}\n"
+                f"ω₀ = 1/√(LC) = {sol['w0']:.4g} rad/s      — the tank "
+                f"blocks current hardest near ω₀\n"
+                f"KVL:  E(t) = I(t)·R + V_t(t)\n"
+                f"{settle}")
+
     # --------------------------------------------------------------- animation
     def _place_cursor(self, i):
+        if self.family == "Series":
+            self._place_cursor_series(i)
+        else:
+            self._place_cursor_parallel(i)
+
+    def _place_cursor_series(self, i):
         cfg = TOPOS[self.topo]
         tm = self.tms[i - 1]
         for ln in (self.cur_q, self.cur_i, self.cur_v):
@@ -915,12 +1354,38 @@ class RLCApp:
                     self.dot_i, self.txt_t, self.txt_vt):
             art.set_visible(True)
 
+    def _place_cursor_parallel(self, i):
+        sol = self.psol
+        tm = self.tms[i - 1]
+        for ln in (self.cur_q, self.cur_i, self.cur_v):
+            ln.set_xdata([tm, tm])
+        self.dot_q.set_data([tm], [sol["V"][i - 1]])
+        self.dot_i.set_data([tm], [sol["I_total"][i - 1]])
+        lines = [f"t = {tm:.2f} ms", f"V = {sol['V'][i - 1]:+.4f} V"]
+        if sol["I_R"] is not None:
+            lines.append(f"I_R = {sol['I_R'][i - 1]:+.4f} A")
+        if sol["I_L"] is not None:
+            lines.append(f"I_L = {sol['I_L'][i - 1]:+.4f} A")
+        if sol["I_C"] is not None:
+            lines.append(f"I_C = {sol['I_C'][i - 1]:+.4f} A")
+        lines.append(f"I_total = {sol['I_total'][i - 1]:+.4f} A")
+        self.txt_p.set_text("\n".join(lines))
+        for art in (self.cur_q, self.cur_i, self.cur_v, self.dot_q,
+                    self.dot_i, self.txt_p):
+            art.set_visible(True)
+
     def _hide_cursor(self):
         for art in (self.cur_q, self.cur_i, self.cur_v, self.dot_q,
-                    self.dot_i, self.txt_t, self.txt_vt):
+                    self.dot_i, self.txt_t, self.txt_vt, self.txt_p):
             art.set_visible(False)
 
     def _draw_upto(self, idx, final=False):
+        if self.family == "Series":
+            self._draw_upto_series(idx, final)
+        else:
+            self._draw_upto_parallel(idx, final)
+
+    def _draw_upto_series(self, idx, final=False):
         i = max(1, min(idx, self.npts))
         self.ln_q.set_data(self.tms[:i], self.Q[:i] * 1e3)
         self.ln_i.set_data(self.tms[:i], self.I[:i])
@@ -936,6 +1401,25 @@ class RLCApp:
             Qr, Ir = self.rk4_data
             self.ln_qrk.set_data(self.tms[:i], Qr[:i] * 1e3)
             self.ln_irk.set_data(self.tms[:i], Ir[:i])
+        if final:
+            self._hide_cursor()
+        else:
+            self._place_cursor(i)
+        self.fig.canvas.draw_idle()
+
+    def _draw_upto_parallel(self, idx, final=False):
+        i = max(1, min(idx, self.npts))
+        sol = self.psol
+        self.ln_pv.set_data(self.tms[:i], sol["V"][:i])
+        if self.ln_pe.get_visible():
+            self.ln_pe.set_data(self.tms[:i], sol["Src"][:i])
+        for ln, arr in ((self.ln_pir, sol["I_R"]), (self.ln_pil, sol["I_L"]),
+                        (self.ln_pic, sol["I_C"])):
+            if ln.get_visible() and arr is not None:
+                ln.set_data(self.tms[:i], arr[:i])
+        self.ln_pitot.set_data(self.tms[:i], sol["I_total"][:i])
+        if self.ln_pqc.get_visible():
+            self.ln_pqc.set_data(self.tms[:i], sol["Q_C"][:i] * 1e3)
         if final:
             self._hide_cursor()
         else:

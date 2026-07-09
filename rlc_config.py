@@ -65,3 +65,44 @@ TOPOS = {
               eq_dc="R·I = E₀ (step at t=0)   →   I(t) = E₀/R      "
                     "(algebraic, no transient)"),
 }
+
+# ---- circuit family: series (one shared current) vs. parallel (branch currents) --
+FAMILY_ORDER = ["Series", "Parallel"]
+
+# R∥C, R∥L, R∥L∥C are driven by a CURRENT source I(t) — the dual of the
+# series case — because an ideal *voltage* source forced directly across
+# parallel branches would decouple them entirely (no interaction, no
+# resonance). Tank (R in series with an L∥C tank) stays voltage-driven
+# since R is genuinely in series with the source there.
+PARALLEL_ORDER = ["RC_P", "RL_P", "RLC_P", "TANK"]
+PARALLEL_TOPOS = {
+    "RC_P": dict(L=False, C=True, src="I", label="R∥C",
+                 eq="C·V′ + V/R = I₀·sin(ωt)      V(0) = 0      "
+                    "(current-driven, 1st-order)",
+                 eq_dc="C·V′ + V/R = I₀ (step at t=0)      V(0) = 0      "
+                       "(current-driven, 1st-order)"),
+    "RL_P": dict(L=True, C=False, src="I", label="R∥L",
+                 eq="(L/R)·I_L′ + I_L = I₀·sin(ωt)      I_L(0) = 0      "
+                    "(current-driven, 1st-order in I_L)",
+                 eq_dc="(L/R)·I_L′ + I_L = I₀ (step at t=0)      "
+                       "I_L(0) = 0      (current-driven, 1st-order)"),
+    "RLC_P": dict(L=True, C=True, src="I", label="R∥L∥C",
+                  eq="C·V″ + V′/R + V/L = I₀·ω·cos(ωt)      "
+                     "V(0) = 0,   V′(0) = 0      (current-driven)",
+                  eq_dc="C·V″ + V′/R + V/L = 0  for t>0      V(0) = 0,   "
+                        "V′(0) = I₀/C      (current-driven step)"),
+    "TANK": dict(L=True, C=True, src="E", label="Tank",
+                 eq="C·V_t″ + V_t′/R + V_t/L = (E₀ω/R)·cos(ωt)      "
+                    "V_t(0) = 0,   V_t′(0) = 0      (R + L∥C tank)",
+                 eq_dc="C·V_t″ + V_t′/R + V_t/L = 0  for t>0      "
+                       "V_t(0) = 0,   V_t′(0) = E₀/(RC)      "
+                       "(R + L∥C tank, step)"),
+}
+
+# Default/slider spec for the amplitude control in Parallel family: current-
+# driven presets need a current (A) in a much smaller, more realistic range
+# than the series voltage slider; the Tank preset keeps the voltage slider
+# unchanged since it is voltage-driven like the series topologies.
+PARALLEL_I0_DEFAULT = 0.1
+PARALLEL_I0_BOUNDS = (0.0, 1e4)
+PARALLEL_I0_SLIDER = (0.0, 0.5, 0.005)

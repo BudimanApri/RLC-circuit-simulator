@@ -1,34 +1,45 @@
 # -*- coding: utf-8 -*-
 """
-Interactive Series Circuit Simulator  —  R / RC / RL / LC / RLC
-===============================================================
-General equation (Kirchhoff):  L·Q'' + R·Q' + Q/C = E(t) = E0·sin(ω·t)
-with zero initial state; the topology is chosen with the buttons in the
-CIRCUIT card, and absent components are truly removed from the equation
-(RC and R are solved as exact 1st-order systems, not as numeric limits).
+Interactive Circuit Simulator  —  Series (R/RC/RL/LC/RLC) and
+Parallel (R∥C, R∥L, R∥L∥C, Tank) families
+=======================================================================
+Series family (Kirchhoff, voltage-driven):
+    L·Q'' + R·Q' + Q/C = E(t) = E0·sin(ω·t) or a DC step, zero initial
+    state; absent components are truly removed from the equation (RC and
+    R are exact 1st-order systems, not numeric limits of the 2nd-order one).
 
-Assignment defaults (RLC topology):
+Parallel family (Milestone 2): R∥C, R∥L, and R∥L∥C are driven by a
+CURRENT source (the dual of the series case — an ideal voltage source
+forced directly across parallel branches would decouple them entirely).
+Tank (R in series with an L∥C tank) stays voltage-driven since R is
+genuinely in series with the source there.
+
+Assignment defaults (series RLC topology):
     R = 1000 Ω,  L = 3.5 H,  C = 2×10⁻⁶ F,  E(t) = 120·sin(377·t) Volt
 
 How to run:
     python rlc_simulator.py
 
 Controls:
-    [RLC][RL][RC][LC][R] : choose the circuit topology (CIRCUIT card)
+    [Series][Parallel]   : choose the circuit family
+    [RLC][RL][RC][LC][R] or [R∥C][R∥L][R∥L∥C][Tank] : choose the topology
     [AC][DC]         : choose the source type (sinusoidal vs. a step at t=0)
-    [Play] / space   : animate the Q(t), I(t), V(t) curves (screen-recording)
+    [Play] / space   : animate the curves (screen-recording)
     [1×] [2×] [4×]   : animation speed (or keyboard keys 1 / 2 / 4)
     [Reset] / 'r'    : restore every parameter to the assignment values
-    Sliders          : vary R, L, C, E0, ω, and the time span
+    Sliders          : vary R, L, C, the amplitude, ω, and the time span
+                       (the amplitude slider is volts for Series/Tank and
+                       amps for the current-driven parallel presets)
     Numeric boxes    : type an exact value (e.g. 1234.5 or 3,75) then Enter —
                        not limited by the slider resolution/range
     Checkboxes       : steady-state, RK4 verification, transient envelope
-    Hover the charts : read t, Q, I and the component voltages
+                       (series family only, for now)
+    Hover the charts : read the numeric values at the cursor
 
 File structure:
-    rlc_config.py    — shared constants (assignment values, theme, topologies)
-    rlc_solver.py    — exact analytic solutions per topology + RK4 check
-    rlc_schematic.py — circuit schematic that follows the topology
+    rlc_config.py    — shared constants (defaults, theme, topologies)
+    rlc_solver.py    — exact analytic solutions (series + parallel) + RK4
+    rlc_schematic.py — circuit schematics (series and parallel)
     rlc_app.py       — matplotlib UI (charts, cards, widgets)
     rlc_simulator.py — entry point + test mode (--test [output.png])
 """
@@ -44,9 +55,11 @@ if "--test" in sys.argv:
 import numpy as np                              # noqa: E402
 import matplotlib.pyplot as plt                 # noqa: E402
 
-from rlc_config import DEF, TOPO_ORDER, TOPOS   # noqa: E402
-from rlc_solver import solve, solve_rk4         # noqa: E402
-from rlc_app import RLCApp                      # noqa: E402
+from rlc_config import (DEF, TOPO_ORDER, TOPOS, PARALLEL_ORDER,   # noqa: E402
+                        PARALLEL_TOPOS, PARALLEL_I0_DEFAULT)
+from rlc_solver import (solve, solve_rk4, solve_parallel,         # noqa: E402
+                        solve_parallel_rk4)
+from rlc_app import RLCApp                                         # noqa: E402
 
 
 def _self_test(app):
@@ -87,6 +100,48 @@ def _self_test(app):
                     max(float(np.max(np.abs(sol["VL"]))), 1e-12)
                 assert err < 2e-3, (mode, topo, err)
     print("voltage : KVL + V_L = L·dI/dt OK  (AC and DC)")
+
+    # 2b) parallel circuits (Milestone 2): analytic vs RK4 + exact KCL
+    t2 = np.linspace(0, 0.08, 4000)
+    for mode in ("AC", "DC"):
+        for preset in PARALLEL_ORDER:
+            amp = E0 if preset == "TANK" else PARALLEL_I0_DEFAULT
+            psol = solve_parallel(preset, R, L, C, amp, w, t2, mode=mode)
+            rk = solve_parallel_rk4(preset, R, L, C, amp, w, t2, mode=mode)
+            # RL_P's RK4 state variable is I_L directly; every other preset
+            # integrates V (or V_tank).
+            ref = psol["I_L"] if preset == "RL_P" else psol["V"]
+            rv = float(np.max(np.abs(rk[0] - ref))) / \
+                max(float(np.max(np.abs(ref))), 1e-15)
+            print(f"{mode} {preset:5s} | {psol['damping']:22s} | "
+                  f"rel|dV| = {rv:.1e}")
+            assert rv < 1e-6, (mode, preset, rv)
+
+            branches = np.zeros_like(t2)
+            for key in ("I_R", "I_L", "I_C"):
+                if psol[key] is not None:
+                    branches = branches + psol[key]
+            if preset == "TANK":
+                kcl = float(np.max(np.abs(psol["I_L"] + psol["I_C"]
+                                          - psol["I_total"])))
+            else:
+                kcl = float(np.max(np.abs(branches - psol["I_total"])))
+            assert kcl < 1e-9 * max(amp, 1.0), (mode, preset, kcl)
+    print("parallel: RK4 cross-check + exact KCL OK  (AC and DC, "
+          "all 4 presets)")
+
+    # R=0 edge case for R∥L (current-driven): R=0 is a dead short across L,
+    # so I_L stays ~0 for any practical time window (all current takes the
+    # R=0 path) — I_L itself is tiny here (~1e-12), so check against I0's
+    # scale rather than I_L's own near-zero scale, which would blow up a
+    # relative-error check on noise.
+    psol = solve_parallel("RL_P", 0.0, L, C, PARALLEL_I0_DEFAULT, w, t2,
+                          mode="DC")
+    rk = solve_parallel_rk4("RL_P", 0.0, L, C, PARALLEL_I0_DEFAULT, w, t2,
+                            mode="DC")
+    rv = float(np.max(np.abs(rk[0] - psol["I_L"]))) / PARALLEL_I0_DEFAULT
+    assert rv < 1e-9, rv
+    print("parallel: R∥L with R=0 edge case OK")
 
     # 3) assignment answer numbers (default RLC)
     sol = solve("RLC", R, L, C, E0, w, t)
@@ -175,6 +230,50 @@ def _self_test(app):
     app._set_topo("RLC")
     print("widget  : AC/DC source toggle OK")
 
+    # 7b) parallel family (Milestone 2): family toggle, preset switching,
+    #     amplitude-slider unit swap, impedance panel behaviour, screenshots
+    assert app.family == "Series"
+    assert app.ln_q.get_visible() is True
+    assert app.ln_pv.get_visible() is False
+    app._set_family("Parallel")
+    assert app.ln_q.get_visible() is False
+    assert app.ln_pv.get_visible() is True
+    assert app.parallel_preset == "RC_P"
+    assert app._amp_is_voltage is False
+    assert abs(app.vals["E0"] - PARALLEL_I0_DEFAULT) < 1e-9
+    assert app.ln_pil.get_visible() is False       # RC_P has no L branch
+    assert app.txt_no_c.get_visible() is False      # RC_P has a capacitor
+    app.fig.savefig(base + "_par_rc" + ext, dpi=110)
+
+    app._set_parallel_preset("RL_P")
+    assert app.ln_pic.get_visible() is False        # RL_P has no C branch
+    assert app.txt_no_c.get_visible() is True        # nothing to plot on ax_v
+    app.fig.savefig(base + "_par_rl" + ext, dpi=110)
+
+    app._set_parallel_preset("RLC_P")
+    assert app.ln_pir.get_visible() and app.ln_pil.get_visible() \
+        and app.ln_pic.get_visible()
+    assert app.psol["Zp"] is not None                # AC: has antiresonance
+    app.fig.savefig(base + "_par_rlc" + ext, dpi=110)
+
+    app._set_parallel_preset("TANK")
+    assert app._amp_is_voltage is True               # Tank is voltage-driven
+    assert abs(app.vals["E0"] - DEF["E0"]) < 1e-9
+    assert app.ln_pe.get_visible() is True            # Tank shows E(t) too
+    app.fig.savefig(base + "_par_tank" + ext, dpi=110)
+
+    app._set_source("DC")
+    assert app.ax_res.get_visible() is False          # DC hides the gauge
+    app.fig.savefig(base + "_par_tank_dc" + ext, dpi=110)
+    app._set_source("AC")
+
+    app._set_family("Series")
+    assert app.ln_q.get_visible() is True
+    assert app.ln_pv.get_visible() is False
+    assert app._amp_is_voltage is True
+    assert abs(app.vals["E0"] - DEF["E0"]) < 1e-9
+    print("widget  : parallel family (Milestone 2) OK")
+
     # 8) animation + overlay path, then the main screenshot
     app.chk.set_active(0)
     app.chk.set_active(1)
@@ -193,11 +292,11 @@ if __name__ == "__main__":
             pass
         _self_test(app)
     else:
-        print("Series Circuit Simulator (R/RC/RL/LC/RLC) - close the window "
-              "to quit.")
-        print("Controls: topology buttons (RLC/RL/RC/LC/R), Play (space), "
-              "Reset ('r'),")
-        print("          sliders + numeric boxes (Enter), speed 1x/2x/4x, "
-              "checkboxes,")
+        print("Circuit Simulator (Series R/RC/RL/LC/RLC + Parallel "
+              "R∥C/R∥L/R∥L∥C/Tank) - close the window to quit.")
+        print("Controls: family buttons (Series/Parallel), topology "
+              "buttons, AC/DC, Play (space),")
+        print("          Reset ('r'), sliders + numeric boxes (Enter), "
+              "speed 1x/2x/4x, checkboxes,")
         print("          hover the charts to read values.")
         plt.show()
