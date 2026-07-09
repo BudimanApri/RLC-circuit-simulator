@@ -109,6 +109,6 @@ venv.bak/
 .DS_Store
 Thumbs.db
 
-.ROADMAP.md
-.CONTEXT_HANDOFF.md
+ROADMAP.md
+CONTEXT_HANDOFF.md
 .gitignore
