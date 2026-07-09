@@ -194,19 +194,24 @@ fixed presets above.
 
 **Palette:** `R  L  C  VSRC  ISRC  WIRE  GROUND  SELECT  DELETE`
 
-1. Pick a tool, then click a grid point and an **adjacent** grid point to
-   place that component between them (one grid step, horizontally or
-   vertically — whichever direction you click determines the orientation,
-   there's no separate rotate step). Clicking a non-adjacent point just
-   moves your anchor there instead of placing anything.
-2. **Ground**: click any grid point to make it "0" — the reference every
+1. **Components** (R/L/C/VSRC/ISRC): click a grid point, then click an
+   **adjacent** grid point — horizontal, vertical, or 45° diagonal (handy
+   for delta-star-style wiring) — to place that component between them.
+   Whichever direction you click determines the orientation; there's no
+   separate rotate step. Clicking a non-adjacent point just moves your
+   anchor there instead of placing anything.
+2. **Wires**: click a start point, then click *any other* point in a
+   straight line from it — horizontal, vertical, or diagonal, any
+   distance. Every grid point in between is wired automatically, so a long
+   run takes two clicks instead of one per hop.
+3. **Ground**: click any grid point to make it "0" — the reference every
    voltage is measured against.
-3. **Select**: click a component to edit its value (and, for VSRC/ISRC,
-   toggle AC/DC and set ω) in the PROPERTIES card, and to toggle its
-   current into the RESULTS charts. Click a bare grid point to toggle its
-   voltage into the results instead.
-4. **Delete**: click a component or wire to remove it.
-5. **Save JSON** / **Load JSON**: write or read back the circuit
+4. **Select**: click a component to edit its value (and, for VSRC/ISRC,
+   toggle AC/DC, set ω, and flip polarity) in the PROPERTIES card, and to
+   toggle its current into the RESULTS charts. Click a bare grid point to
+   toggle its voltage into the results instead.
+5. **Delete**: click a component or wire to remove it.
+6. **Save JSON** / **Load JSON**: write or read back the circuit
    (`Netlist.to_json()`/`from_json()` under the hood) via a normal file
    picker.
 
@@ -215,9 +220,24 @@ ground and a source and validates — before that, the CIRCUIT card tells
 you what's missing in plain language rather than failing silently or
 crashing.
 
-For a source's polarity: whichever grid point you click **first** is its
-"+" terminal (VSRC) or the direction current flows away from (ISRC) — the
-same node_a/node_b convention the netlist engine uses everywhere.
+**Source polarity:** whichever grid point you click **first** when placing
+a VSRC/ISRC is node_a — its "+" terminal (VSRC) or the direction current
+flows away from (ISRC), the same node_a/node_b convention the netlist
+engine uses everywhere. This is marked on the schematic itself (+/− labels
+on VSRC, the arrow on ISRC) and shown in the PROPERTIES card; it can be
+reversed after the fact with the **flip polarity** button instead of
+deleting and re-placing the source in the opposite click order — this
+matters because, exactly like a real battery, swapping which terminal
+lands where flips the sign of every current and charge downstream of it.
+
+**AC vs. DC symbols:** VSRC draws as a circle with a sine wiggle for AC,
+or a battery bar pair (long/thin near "+", short/thick near "−") for DC,
+so the two aren't visually confusable. ISRC always draws as a circled
+arrow (the arrow is itself the polarity/direction indicator); AC adds a
+small sine tick inside the circle. When **every** source in the circuit is
+DC, small grey arrows appear on each component showing the actual
+(steady-state) current direction — omitted for AC circuits since the
+direction reverses every half-cycle there.
 
 ## Display elements
 

@@ -11,21 +11,34 @@ How to run:
 
 Interaction model (click-click, not drag — far more robust in matplotlib
 than continuous dragging, and orientation falls out for free: whichever
-adjacent grid point you click second determines horizontal vs. vertical):
+adjacent grid point you click second determines the direction):
 
     1. Pick a tool from the palette row: R, L, C, VSRC, ISRC, Wire, Ground,
        Select, Delete.
-    2. For a component/wire tool: click a grid point, then click an
-       *adjacent* grid point (one grid step away, horizontally or
-       vertically) to place it between them. Clicking a non-adjacent point
-       instead just moves your anchor there.
+    2. Components (R/L/C/VSRC/ISRC): click a grid point, then click an
+       *adjacent* grid point — horizontal, vertical, or 45-degree diagonal —
+       to place it between them. Clicking a non-adjacent point instead just
+       moves your anchor there.
+       Wires: click a start point, then click *any other* point in a
+       straight line from it (not necessarily adjacent) — every grid point
+       in between is wired automatically, so a long run takes two clicks
+       instead of one per hop.
     3. Ground: click any grid point to designate it "0" (moves if you click
        elsewhere).
     4. Select: click a component to edit its value (and, for sources,
-       source type/frequency) in the PROPERTIES card, and to toggle it into
-       the results as a probed current. Click a bare grid point to toggle
-       its voltage into the results.
+       source type/frequency, and polarity via "flip") in the PROPERTIES
+       card, and to toggle it into the results as a probed current. Click a
+       bare grid point to toggle its voltage into the results.
     5. Delete: click a component or wire to remove it.
+
+Source polarity: whichever grid point you click *first* when placing a
+VSRC/ISRC is node_a — the "+" terminal for VSRC, the tail of the current
+arrow for ISRC. This is marked on the schematic (+/− labels, arrow) and can
+be reversed after the fact with the "flip polarity" button in PROPERTIES.
+DC sources draw as a battery symbol (long/short bars); AC sources draw as a
+circle with a sine wiggle. When every source in the circuit is DC, small
+grey arrows show the actual (steady-state) current direction through each
+component — omitted for AC since direction reverses every half-cycle.
 
 The circuit resolves automatically (via rlc_mna.simulate) after every edit,
 as soon as it has a ground and at least one source and validates.
@@ -75,11 +88,19 @@ class UnionFind:
             self.parent[ra] = rb
 
 
-def _draw_component(ax, kind, p1, p2, color, lw_lead=1.6):
+def _draw_component(ax, kind, p1, p2, color, source_type="DC", lw_lead=1.6):
     """Draw one component symbol on the single grid edge p1->p2 (adjacent
-    grid points, 1.0 apart). Works for both horizontal and vertical edges
-    via a local (along, perpendicular) basis, so there is one code path
-    instead of separate horizontal/vertical drawing routines."""
+    grid points, one grid step apart — horizontal, vertical, or diagonal).
+    Works for any direction via a local (along, perpendicular) basis, so
+    there is one code path instead of separate per-orientation routines.
+
+    p1 is always node_a: the "+" terminal for VSRC, the tail of the current
+    arrow for ISRC (the netlist's own polarity convention). `source_type`
+    ("AC"/"DC") only affects VSRC/ISRC symbols: AC draws the classic
+    circle-with-sine-wiggle, DC draws a battery bar pair (long/thin near
+    node_a "+", short/thick near node_b "−") so the two aren't visually
+    confusable — a DC source drawn with an AC sine symbol was a reported
+    point of confusion."""
     a, b = np.array(p1, dtype=float), np.array(p2, dtype=float)
     d = b - a
     length = np.hypot(*d)
@@ -139,18 +160,64 @@ def _draw_component(ax, kind, p1, p2, color, lw_lead=1.6):
         th = np.linspace(0, 2 * np.pi, 40)
         ax.plot(c[0] + r * np.cos(th), c[1] + r * np.sin(th), color=color,
                 lw=1.6, zorder=3)
+        is_ac = source_type == "AC"
         if kind == "VSRC":
-            ts = np.linspace(-0.18, 0.18, 30)
-            wig = (c + np.outer(ts, u)
-                  + np.outer(0.10 * np.sin(ts / 0.18 * np.pi), perp))
-            ax.plot(wig[:, 0], wig[:, 1], color=color, lw=1.2, zorder=3)
+            if is_ac:
+                ts = np.linspace(-0.18, 0.18, 30)
+                wig = (c + np.outer(ts, u)
+                      + np.outer(0.10 * np.sin(ts / 0.18 * np.pi), perp))
+                ax.plot(wig[:, 0], wig[:, 1], color=color, lw=1.2, zorder=3)
+            else:
+                # battery bars: long/thin toward node_a ("+"), short/thick
+                # toward node_b ("-") -- distinct at a glance from the AC
+                # sine symbol above
+                p_plus = c - u * 0.09
+                p_minus = c + u * 0.09
+                for cc, w, lw_ in ((p_plus, 0.17, 1.4), (p_minus, 0.09, 3.4)):
+                    e1, e2 = cc + perp * w, cc - perp * w
+                    ax.plot([e1[0], e2[0]], [e1[1], e2[1]], color=color,
+                            lw=lw_, solid_capstyle="butt", zorder=3)
+            lbl_plus = pt(0.08, 0.42)
+            lbl_minus = pt(0.92, 0.42)
+            ax.text(*lbl_plus, "+", color=color, fontsize=7.5,
+                   weight="bold", ha="center", va="center", zorder=5)
+            ax.text(*lbl_minus, "−", color=color, fontsize=8.5,
+                   weight="bold", ha="center", va="center", zorder=5)
         else:
             tail, head = c - u * 0.16, c + u * 0.16
             ax.annotate("", xy=tuple(head), xytext=tuple(tail),
                        arrowprops=dict(arrowstyle="-|>", color=color,
                                        lw=1.6, mutation_scale=11), zorder=4)
+            if is_ac:
+                # small sine tick tucked inside the circle, above the arrow
+                # -- kept inside the circle radius (not above it) since the
+                # component's name label sits right at the circle's top edge
+                ts = np.linspace(-0.11, 0.11, 20)
+                base = c + perp * 0.15
+                wig = (base + np.outer(ts, u)
+                      + np.outer(0.045 * np.sin(ts / 0.11 * np.pi), perp))
+                ax.plot(wig[:, 0], wig[:, 1], color=color, lw=1.0, zorder=4)
         ax.plot([p_lo[0], (c - u * r)[0]], [p_lo[1], (c - u * r)[1]], **wire)
         ax.plot([(c + u * r)[0], p_hi[0]], [(c + u * r)[1], p_hi[1]], **wire)
+
+
+def _draw_current_arrow(ax, p1, p2, sign, color="#334155"):
+    """Small directional arrow offset off to the side of the p1->p2 edge,
+    showing which way current actually flows (sign is the last-sample sign
+    of the component's node_a->node_b current). Only meaningful for DC —
+    callers should not call this for circuits with any AC source, since the
+    direction reverses every half-cycle there."""
+    a, b = np.array(p1, dtype=float), np.array(p2, dtype=float)
+    d = b - a
+    length = np.hypot(*d)
+    u = d / length
+    perp = np.array([-u[1], u[0]])
+    mid = a + u * length * 0.5 + perp * 0.34
+    s = 1.0 if sign >= 0 else -1.0
+    tail, head = mid - u * 0.14 * s, mid + u * 0.14 * s
+    ax.annotate("", xy=tuple(head), xytext=tuple(tail),
+               arrowprops=dict(arrowstyle="-|>", color=color, lw=1.5,
+                               mutation_scale=10), zorder=5)
 
 
 class BuilderApp:
@@ -179,9 +246,9 @@ class BuilderApp:
         self.fig.text(0.02, 0.975, "Circuit Builder", fontsize=15,
                       weight="bold", color=TH["text"], va="center")
         self.fig.text(0.02, 0.952,
-                      "click a tool, then click a grid point and an "
-                      "adjacent one to place it", fontsize=8.5,
-                      color=TH["sub"], va="center")
+                      "components: click 2 points, adjacent incl. diagonal "
+                      "· wires: click 2 points on a line, any distance",
+                      fontsize=8.5, color=TH["sub"], va="center")
 
         # ---- palette --------------------------------------------------------
         self.tool_btns = {}
@@ -237,9 +304,17 @@ class BuilderApp:
         self.box_freq = TextBox(axf, "", initial="", color="#f8fafc")
         self.box_freq.on_submit(self._on_freq_submit)
 
-        self.fig.text(0.615, 0.750,
-                      "select a component (SELECT tool) to edit it here",
-                      fontsize=7.2, color=TH["sub"])
+        self.txt_hint = self.fig.text(
+            0.615, 0.750, "select a component (SELECT tool) to edit it here",
+            fontsize=7.2, color=TH["sub"])
+        axflip = self.fig.add_axes([0.615, 0.745, 0.235, 0.026])
+        self.btn_flip = Button(axflip, "⇄ flip polarity (+ / −)",
+                               color="#e2e8f0", hovercolor="#cbd5e1")
+        self.btn_flip.label.set_fontsize(7.3)
+        for sp in axflip.spines.values():
+            sp.set_visible(False)
+        self.btn_flip.on_clicked(lambda ev: self._flip_selected())
+        self.btn_flip.ax.set_visible(False)
 
         # ---- circuit card (time span, save/load, status) -------------------------
         self._card([0.605, 0.335, 0.375, 0.375], "CIRCUIT")
@@ -431,8 +506,22 @@ class BuilderApp:
             self.anchor_dot.set_data([], [])
             self.fig.canvas.draw_idle()
             return
-        manhattan = abs(p[0] - self.anchor[0]) + abs(p[1] - self.anchor[1])
-        if manhattan != 1:
+
+        if self.tool == "WIRE":
+            path = self._wire_path(self.anchor, p)
+            if path is None:
+                self.anchor = p            # not a straight line -> move anchor
+                self.anchor_dot.set_data([p[0]], [p[1]])
+                self.fig.canvas.draw_idle()
+                return
+            self._place_wire_path(path)
+            self.anchor = None
+            self.anchor_dot.set_data([], [])
+            return
+
+        dx = abs(p[0] - self.anchor[0])
+        dy = abs(p[1] - self.anchor[1])
+        if max(dx, dy) != 1:
             self.anchor = p                    # not adjacent -> move anchor
             self.anchor_dot.set_data([p[0]], [p[1]])
             self.fig.canvas.draw_idle()
@@ -448,15 +537,43 @@ class BuilderApp:
             self.fig.canvas.draw_idle()
 
     # ---------------------------------------------------------- placement
+    def _wire_path(self, a, b):
+        """Grid points from a to b inclusive, straight-line only (0/45/90
+        degrees). Returns None if a->b isn't a straight 8-direction line —
+        the caller then treats it as a normal "move the anchor" click. This
+        is what lets a long wire run be placed with two clicks instead of
+        one click per grid hop."""
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        if dx == 0 and dy == 0:
+            return None
+        if not (dx == 0 or dy == 0 or abs(dx) == abs(dy)):
+            return None
+        steps = max(abs(dx), abs(dy))
+        sx = 0 if dx == 0 else dx // abs(dx)
+        sy = 0 if dy == 0 else dy // abs(dy)
+        return [(a[0] + sx * k, a[1] + sy * k) for k in range(steps + 1)]
+
+    def _place_wire_path(self, path):
+        placed = skipped = 0
+        for p1, p2 in zip(path, path[1:]):
+            if self._edge_occupied(p1, p2):
+                skipped += 1
+                continue
+            self.wires.append((p1, p2))
+            placed += 1
+        if skipped:
+            self._set_status(f"Wire {path[0]}-{path[-1]}: {placed} "
+                             f"segment(s) placed, {skipped} skipped "
+                             f"(already occupied).")
+        else:
+            self._set_status(f"Wire placed {path[0]}-{path[-1]} "
+                             f"({placed} segment(s)).")
+        self._resolve()
+
     def _place(self, p1, p2):
         if self._edge_occupied(p1, p2):
             self._set_status("That edge already has something on it — "
                              "delete it first.")
-            return
-        if self.tool == "WIRE":
-            self.wires.append((p1, p2))
-            self._set_status(f"Wire placed {p1}-{p2}.")
-            self._resolve()
             return
         kind = self.tool
         n = self._next_id[kind]
@@ -525,17 +642,24 @@ class BuilderApp:
             self.box_value.set_val("")
             self.box_freq.set_val("")
             self.box_freq.ax.set_visible(False)
+            self.btn_flip.ax.set_visible(False)
+            self.txt_hint.set_visible(True)
             for b in self.src_btns.values():
                 b.color = "#e2e8f0"
                 b.ax.set_facecolor(b.color)
                 b.ax.set_visible(False)
             self.fig.canvas.draw_idle()
             return
-        self.txt_sel.set_text(f"{pl['name']}  ({pl['kind']})")
-        self.box_value.set_val(f"{pl['value']:.6g}")
         is_src = pl["kind"] in ("VSRC", "ISRC")
+        label = "+" if pl["kind"] == "VSRC" else "current from"
+        self.txt_sel.set_text(f"{pl['name']}  ({pl['kind']})" +
+                              (f"   [{label} @ {pl['p1']}]" if is_src
+                               else ""))
+        self.box_value.set_val(f"{pl['value']:.6g}")
         self.box_freq.ax.set_visible(is_src and pl["source_type"] == "AC")
         self.box_freq.set_val(f"{pl['freq']:.6g}")
+        self.btn_flip.ax.set_visible(is_src)
+        self.txt_hint.set_visible(not is_src)
         for nm, b in self.src_btns.items():
             b.ax.set_visible(is_src)
             active = is_src and nm == pl["source_type"]
@@ -543,6 +667,21 @@ class BuilderApp:
             b.ax.set_facecolor(b.color)
             b.label.set_color("white" if active else TH["text"])
         self.fig.canvas.draw_idle()
+
+    def _flip_selected(self):
+        """Swap node_a/node_b on the selected source, reversing its
+        polarity (VSRC "+"/"-") or current direction (ISRC) without having
+        to delete and re-place it in the opposite click order."""
+        if self.selected is None:
+            return
+        pl = self.placements[self.selected]
+        if pl["kind"] not in ("VSRC", "ISRC"):
+            return
+        pl["p1"], pl["p2"] = pl["p2"], pl["p1"]
+        self._set_status(f"Flipped {pl['name']} — now referenced from "
+                         f"{pl['p1']}.")
+        self._show_properties(pl)
+        self._resolve()
 
     def _on_value_submit(self, text):
         if self.selected is None:
@@ -660,15 +799,29 @@ class BuilderApp:
                 ax.texts + ax.collections:
             art.remove()
 
+        sources = [pl for pl in self.placements
+                  if pl["kind"] in ("VSRC", "ISRC")]
+        show_flow = (self.result is not None and sources
+                    and all(pl["source_type"] == "DC" for pl in sources))
+
         for p1, p2 in self.wires:
             _draw_component(ax, "WIRE", p1, p2, "#334155")
         for i, pl in enumerate(self.placements):
             color = KIND_COLOR[pl["kind"]]
-            _draw_component(ax, pl["kind"], pl["p1"], pl["p2"], color)
+            _draw_component(ax, pl["kind"], pl["p1"], pl["p2"], color,
+                            source_type=pl.get("source_type", "DC"))
             mx = (pl["p1"][0] + pl["p2"][0]) / 2.0
             my = (pl["p1"][1] + pl["p2"][1]) / 2.0
             ax.text(mx, my + 0.30, pl["name"], fontsize=6.5, ha="center",
                    color=color, zorder=5)
+            if show_flow:
+                try:
+                    i_arr = probe_current(self.result, pl["name"])
+                    if len(i_arr):
+                        _draw_current_arrow(ax, pl["p1"], pl["p2"],
+                                           float(i_arr[-1]))
+                except KeyError:
+                    pass
             if i == self.selected:
                 ax.plot(mx, my, "s", ms=14, mfc="none", mec=TH["accent"],
                        mew=1.6, zorder=4)
@@ -908,14 +1061,79 @@ def _self_test(app, out):
 
     app.fig.savefig(base + "_rlc" + ext, dpi=110)
 
-    # 4) delete via the real click dispatcher
+    # 4) flip polarity: reversing a source's node_a/node_b must negate every
+    #    downstream result (I and Q both flip sign) -- this is the concrete
+    #    check that polarity is both physically wired up and user-
+    #    controllable, not just silently determined by click order
+    pre_I = probe_current(app.result, "R1").copy()
+    pre_Q = probe_charge(app.result, "C1").copy()
+    app._set_tool("SELECT")
+    app._select_for_edit(v_idx)
+    app._flip_selected()
+    post_I = probe_current(app.result, "R1")
+    post_Q = probe_charge(app.result, "C1")
+    assert np.allclose(post_I, -pre_I, atol=1e-9), \
+        float(np.max(np.abs(post_I + pre_I)))
+    assert np.allclose(post_Q, -pre_Q, atol=1e-9), \
+        float(np.max(np.abs(post_Q + pre_Q)))
+    app._flip_selected()                # flip back for the tests below
+    print("builder : flip polarity negates I/Q as expected")
+
+    # 5) diagonal placement: a component can span a 45-degree grid edge, not
+    #    just horizontal/vertical (needed for e.g. delta-star wiring)
+    app4 = BuilderApp()
+    app4._set_tool("R")
+    _click(app4, 4, 4)
+    _click(app4, 5, 5)
+    assert app4.placements and app4.placements[-1]["p1"] == (4, 4) and \
+        app4.placements[-1]["p2"] == (5, 5), app4.placements
+    print("builder : diagonal component placement OK")
+
+    # 6) multi-hop wire: two clicks on a straight (horizontal/vertical/
+    #    diagonal) line auto-fill every intermediate grid point instead of
+    #    needing one click per hop
+    app4._set_tool("WIRE")
+    _click(app4, 0, 8)
+    _click(app4, 4, 8)                  # 4 grid steps away, same row
+    assert len(app4.wires) == 4, app4.wires
+    assert app4.wires[0] == ((0, 8), (1, 8))
+    assert app4.wires[-1] == ((3, 8), (4, 8))
+    app4._set_tool("WIRE")
+    _click(app4, 6, 0)
+    _click(app4, 9, 3)                  # diagonal, 3 grid steps away
+    assert len(app4.wires) == 4 + 3, app4.wires
+    print("builder : multi-hop wire auto-fill (straight + diagonal) OK")
+
+    # 7) DC current-flow arrows render without raising; the redraw path
+    #    that computes them (show_flow) only engages when every source in
+    #    the circuit is DC
+    app5 = BuilderApp()
+    app5._set_tool("VSRC")
+    _click(app5, 0, 0)
+    _click(app5, 0, 1)
+    app5.placements[-1].update(value=10.0, source_type="DC")
+    app5._set_tool("R")
+    _click(app5, 0, 1)
+    _click(app5, 1, 1)
+    app5._set_tool("WIRE")
+    _click(app5, 1, 1)
+    _click(app5, 1, 0)
+    _click(app5, 1, 0)
+    _click(app5, 0, 0)
+    app5._set_tool("GROUND")
+    _click(app5, 0, 0)
+    assert app5.result is not None, app5.status
+    app5._redraw_canvas()               # must not raise for an all-DC circuit
+    print("builder : DC current-flow arrows render without error")
+
+    # 8) delete via the real click dispatcher
     n_before = len(app.placements)
     app._set_tool("DELETE")
     _click(app, 1.5, 1.0)               # L1's midpoint
     assert len(app.placements) == n_before - 1
     print("builder : delete via click OK")
 
-    # 5) save/load JSON round-trip (bypass the tkinter file dialog)
+    # 9) save/load JSON round-trip (bypass the tkinter file dialog)
     path = base + "_saved.json"
     data_before = app.build_netlist()[0].to_dict()
     app._file_dialog = lambda save: path
@@ -927,7 +1145,7 @@ def _self_test(app, out):
     assert data_before == data_after
     print("builder : save/load JSON round-trip OK")
 
-    # 6) validation feedback for incomplete circuits never crashes
+    # 10) validation feedback for incomplete circuits never crashes
     app3 = BuilderApp()
     assert "Pick a tool" in app3.status
     app3._set_tool("R")
@@ -942,7 +1160,7 @@ def _self_test(app, out):
     print("builder : validation feedback (no ground/source, floating "
           "node) OK")
 
-    # 7) clear_all leaves a consistent empty state
+    # 11) clear_all leaves a consistent empty state
     app3.clear_all()
     assert not app3.placements and not app3.wires and app3.ground is None
     app3.fig.savefig(base + "_empty" + ext, dpi=100)
