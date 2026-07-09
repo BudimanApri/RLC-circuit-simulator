@@ -112,7 +112,7 @@ depends on R, L, C. Only the steady-state / particular solution and the
 "Solution" formulas differ. Switching source type keeps the same topology,
 component values, and time span.
 
-## Parallel circuits (Milestone 2)
+## Parallel circuits
 
 Switch to the **Parallel** family to explore four presets: **R∥C**, **R∥L**,
 **R∥L∥C**, and **Tank** (R in series with an L∥C tank).
@@ -152,7 +152,7 @@ the 5τ transient marker works the same way as in series mode. Steady-state
 overlay, RK4 verification, and the transient envelope are series-only for
 now — planned for a future update.
 
-## General netlist engine (Milestone 3)
+## General netlist engine
 
 Underneath the app's fixed presets there is a genuinely general circuit
 solver: build **any** network of resistors, inductors, capacitors, and
@@ -195,7 +195,7 @@ any R. Performance: a 19-component circuit resolves at ~20 recomputes/sec
 at the app's default 3000-sample resolution — fast enough for live
 interactive use, though it degrades at much higher sample counts.
 
-## Free-form circuit builder (Milestone 4)
+## Free-form circuit builder
 
 ```
 python rlc_builder.py
